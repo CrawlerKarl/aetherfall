@@ -1,0 +1,9 @@
+{
+  "name": "aetherfall",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AETHERFALL — a magitech arcade campaign: brick-breaker, wall shooter, and flight shooter across nine realms.",
+  "scripts": {
+    "serve": "node serve.js"
+  }
+}

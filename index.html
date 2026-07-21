@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="preload" href="assets/fonts/orbitron.woff2" as="font" type="font/woff2" crossorigin>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>AETHERFALL</title>
+<style>
+  /* Orbitron is vendored locally (variable font, weights 400-900) — the game
+     has no other network dependency, so the fonts shouldn't be one either */
+  @font-face {
+    font-family: 'Orbitron';
+    src: url('assets/fonts/orbitron.woff2') format('woff2');
+    font-weight: 400 900;
+    font-display: swap;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #05060f; overscroll-behavior: none; }
+  /* pinned to the visual viewport so the bottom of the play area (and the
+     touch controls anchored to it) can never fall behind a mobile browser
+     toolbar or the home indicator */
+  canvas { display: block; position: fixed; top: 0; left: 0; cursor: none; touch-action: none; }
+  /* probes for the phone's safe areas — bottom (home indicator) plus top /
+     left / right (notch, Dynamic Island, rounded landscape corners) */
+  #safe-probe { position: fixed; bottom: 0; height: env(safe-area-inset-bottom, 0px); width: 1px; visibility: hidden; }
+  #safe-probe-t { position: fixed; top: 0; height: env(safe-area-inset-top, 0px); width: 1px; visibility: hidden; }
+  #safe-probe-l { position: fixed; left: 0; width: env(safe-area-inset-left, 0px); height: 1px; visibility: hidden; }
+  #safe-probe-r { position: fixed; right: 0; width: env(safe-area-inset-right, 0px); height: 1px; visibility: hidden; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="safe-probe"></div>
+<div id="safe-probe-t"></div>
+<div id="safe-probe-l"></div>
+<div id="safe-probe-r"></div>
+<script src="js/setup.js"></script>
+<script src="js/config.js"></script>
+<script src="js/skin.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/data.js"></script>
+<script src="js/pokeworld.js"></script>
+<script src="js/aetherfall.js"></script>
+<script src="js/aetherfall-overrides.generated.js"></script>
+<script src="js/aetherart.js"></script>
+<script src="js/scenery.js"></script>
+<script src="js/state.js"></script>
+<script src="js/input.js"></script>
+<script src="js/update.js"></script>
+<script src="js/render.js"></script>
+<script src="js/dev.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
