@@ -455,42 +455,68 @@ function affinityVesselImage(id, big, forceBase) {
   }
   return aetherAuxImage('trainingDrone');
 }
-// The vessel wears its sworn path. LIGHT flies the RADIANT casting, DARK the
-// base hull — but the tell has to survive a phone glance, so the affinity
-// colour is BAKED into the sprite (source-atop wash + rim) instead of leaning
-// on ctx.filter, which some mobile browsers quietly ignore. Baked once per
-// (id, affinity) like every other repeated art surface.
+// The vessel wears its sworn path — but the oath is an EVOLUTION ARC, not a
+// costume (AFT-017). Each treatment channel has its OWN per-form curve; a
+// single alpha multiplier can't make Form I read as a restrained mark and
+// Form III as an unmistakable transformation. LIGHT's SOURCE ART is part of
+// the arc too: Form I flies the base casting, Form II blends radiant
+// materials in, only Form III earns the true radiant source. Everything is
+// baked once per (id, affinity, form) — source-atop only, never 'lighter'
+// (additive paints the transparent pixels and lights the bounding box).
+const OATH_CH = {
+  tint:  [0.10, 0.48, 1.00], // material wash strength
+  rim:   [0.14, 0.52, 1.00], // warm highlight / umbral deepening
+  aura:  [0.08, 0.45, 1.00], // outer glow radius
+  fitS:  [0.25, 0.60, 1.00], // rear-fitting scale (20–30% reveal at Form I)
+  fitA:  [0.25, 0.62, 1.00], // rear-fitting opacity
+  blend: [0.00, 0.45, 1.00], // LIGHT radiant-source blend
+  runes: [1, 3, 6],          // engraved oath marks on the hull
+};
+function oathCh(ch, form) {
+  const f = Math.max(1, Math.min(3, form || G.starterLvl || 1));
+  return OATH_CH[ch][f - 1];
+}
 function affinityVesselSprite(id, big, neutral) {
   const aff = !neutral && ((SKIN.affinities && SETTINGS.affinity) || null);
-  const img = affinityVesselImage(id, big, neutral);
-  if (!img || !img.complete || !img.naturalWidth) return null;
-  if (!aff) return img;
-  // THE OATH DEEPENS BY ARC (2026-07-22): Form I wears its path lightly;
-  // each ascension makes the radiant gold / umbral violet unmistakable.
+  const base = affinityVesselImage(id, big, true); // the hull as forged
+  if (!base || !base.complete || !base.naturalWidth) return null;
+  if (!aff) return base;
   const form = vesselForm(id);
-  const grade = [0.42, 0.72, 1][form - 1] || 1;
-  const key = 'vessel_' + id + '_' + aff + '_' + form + '_' + img.naturalWidth;
+  const blend = aff === 'light' ? oathCh('blend', form) : 0;
+  const radiant = blend > 0 ? affinityVesselImage(id, big, false) : null;
+  const radiantReady = !!(radiant && radiant.complete && radiant.naturalWidth && radiant !== base);
+  const key = 'vessel_' + id + '_' + aff + '_' + form + '_' + base.naturalWidth + (radiantReady ? 'r' : '');
   if (fxCache[key]) return fxCache[key];
-  const s = Math.max(8, img.naturalWidth);
+  const s = Math.max(8, base.naturalWidth);
   const c = document.createElement('canvas');
   c.width = s; c.height = s;
   const g = c.getContext('2d');
-  g.drawImage(img, 0, 0, s, s);
-  // tint ONLY the vessel's own pixels
+  g.drawImage(base, 0, 0, s, s);
+  if (radiantReady) { // the radiant materials TAKE HOLD by form, not at once
+    if (blend >= 1) { g.clearRect(0, 0, s, s); g.drawImage(radiant, 0, 0, s, s); }
+    else { g.globalAlpha = blend; g.drawImage(radiant, 0, 0, s, s); g.globalAlpha = 1; }
+  }
+  // material wash — the vessel's own pixels only
   g.globalCompositeOperation = 'source-atop';
-  g.fillStyle = aff === 'light' ? 'rgba(255,214,110,' + (0.30 * grade).toFixed(3) + ')'
-    : 'rgba(150,96,255,' + (0.34 * grade).toFixed(3) + ')';
+  const tint = oathCh('tint', form), rim = oathCh('rim', form);
+  g.fillStyle = aff === 'light' ? 'rgba(255,214,110,' + (0.26 * tint).toFixed(3) + ')'
+    : 'rgba(150,96,255,' + (0.30 * tint).toFixed(3) + ')';
   g.fillRect(0, 0, s, s);
-  if (aff === 'light') { // radiant: a warm highlight ON THE HULL ONLY —
-    // NEVER 'lighter' here: additive paints the transparent pixels too and
-    // the sprite's bounding box shows up as a lit square
-    g.globalCompositeOperation = 'source-atop';
-    g.fillStyle = 'rgba(255,240,190,' + (0.14 * grade).toFixed(3) + ')';
-    g.fillRect(0, 0, s, s);
-  } else { // umbral: deepen the hull so the violet reads as shadow, not paint
-    g.globalCompositeOperation = 'source-atop';
-    g.fillStyle = 'rgba(18,6,42,' + (0.24 * grade).toFixed(3) + ')';
-    g.fillRect(0, 0, s, s);
+  g.fillStyle = aff === 'light' ? 'rgba(255,240,190,' + (0.14 * rim).toFixed(3) + ')'
+    : 'rgba(18,6,42,' + (0.24 * rim).toFixed(3) + ')';
+  g.fillRect(0, 0, s, s);
+  // engraved oath runes: seeded per id, clipped to the hull by source-atop —
+  // one quiet mark at Form I, a constellation by Form III
+  const runeN = oathCh('runes', form);
+  let seed = id * 2654435761 >>> 0;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  g.fillStyle = aff === 'light' ? 'rgba(255,236,170,0.85)' : 'rgba(190,140,255,0.85)';
+  for (let i = 0; i < runeN; i++) {
+    const rx = s * (0.3 + rnd() * 0.4), ry = s * (0.34 + rnd() * 0.4);
+    const rr = s * (0.008 + rnd() * 0.008);
+    g.beginPath();
+    g.moveTo(rx, ry - rr * 1.6); g.lineTo(rx + rr, ry); g.lineTo(rx, ry + rr * 1.6); g.lineTo(rx - rr, ry);
+    g.closePath(); g.fill();
   }
   g.globalCompositeOperation = 'source-over';
   fxCache[key] = c;
@@ -507,17 +533,22 @@ function drawAffinityVessel(id, x, y, size, neutral) {
   const frameKey = !neutral && SKIN.affinities && SETTINGS.affinity
     ? (SETTINGS.affinity === 'light' ? 'lightFrame' : 'darkFrame') : null;
   const frame = frameKey ? aetherAuxImage(frameKey) : null;
+  const form = vesselForm(id);
   if (frame && frame.complete && frame.naturalWidth) {
-    const fs = size * 1.5;
-    ctx.shadowColor = affinityColor() || '#ffffff'; ctx.shadowBlur = size * 0.16;
+    // AFT-017: the rear fitting GROWS with the oath — a 20–30% reveal at
+    // Form I, roughly half at Form II, the full sun/crescent only at Form III
+    const fs = size * (0.75 + 0.75 * oathCh('fitS', form));
+    const fa = oathCh('fitA', form);
+    ctx.globalAlpha = fa;
+    ctx.shadowColor = affinityColor() || '#ffffff'; ctx.shadowBlur = size * 0.16 * fa;
     ctx.drawImage(frame, x - fs / 2, y - fs / 2 + size * 0.03, fs, fs);
-    ctx.shadowBlur = 0;
+    ctx.shadowBlur = 0; ctx.globalAlpha = 1;
   }
   // an affinity-coloured aura reads at any size (the tint itself is baked in)
   const aCol = !neutral && affinityColor();
   if (aCol) {
     ctx.shadowColor = aCol;
-    ctx.shadowBlur = size * 0.22 * ([0.42, 0.72, 1][vesselForm(id) - 1] || 1);
+    ctx.shadowBlur = size * 0.22 * oathCh('aura', form);
     ctx.drawImage(img, x - size / 2, y - size / 2, size, size);
     ctx.shadowBlur = 0;
   }
@@ -782,7 +813,9 @@ function drawBossMon(br, x, y) {
   ctx.font = '900 13px Orbitron, sans-serif';
   ctx.fillStyle = lastStand ? '#ff8a80' : ph === 2 ? '#ffab91' : '#fff';
   ctx.shadowColor = '#000'; ctx.shadowBlur = 5;
-  ctx.fillText((lastStand ? '💀 ' : ph === 2 ? '😡 ' : '★ ') + br.poke.n.toUpperCase() + (ph === 1 ? ' ★' : ''), x, y - hh - 26);
+  if (G.revealDock !== br.poke.id) // AFT-002: a docked boss reads from the HUD lane
+    fitLabel((lastStand ? '💀 ' : ph === 2 ? '😡 ' : '★ ') + br.poke.n.toUpperCase() + (ph === 1 ? ' ★' : ''),
+      x, y - hh - 26, { size: 13, min: 10, weight: 900, maxW: Math.min(W * 0.62, Math.max(160, br.w * 1.5)), zone: 'field' });
   ctx.shadowBlur = 0;
   const bw2 = Math.max(br.w * 0.85, 150), frac = Math.max(0, br.hp / br.maxHp);
   roundRect(x - bw2 / 2, y - hh - 16, bw2, 8, 4);
@@ -944,7 +977,9 @@ function drawBossBrick(br, x, y) {
   ctx.font = '900 13px Orbitron, sans-serif';
   ctx.fillStyle = ph === 3 ? '#ff8a80' : '#ffffff';
   ctx.shadowColor = '#000'; ctx.shadowBlur = 6;
-  ctx.fillText('BOSS BRICK · ' + br.poke.n.toUpperCase(), x, y - hh - 29);
+  if (G.revealDock !== br.poke.id) // AFT-002: a docked boss reads from the HUD lane
+    fitLabel('BOSS BRICK · ' + br.poke.n.toUpperCase(), x, y - hh - 29,
+      { size: 13, min: 10, weight: 900, maxW: Math.min(W * 0.62, Math.max(170, br.w * 1.3)), zone: 'field' });
   ctx.shadowBlur = 0;
   const barW = Math.max(br.w * 0.9, 150), barY = y - hh - 18;
   roundRect(x - barW / 2, barY, barW, 9, 4.5);
@@ -1401,15 +1436,13 @@ function drawBricks() {
     ctx.save();
     ctx.globalAlpha = a;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.font = '900 40px Orbitron, sans-serif';
     const col = TYPE_COLORS[boss.poke.t];
     ctx.shadowColor = col; ctx.shadowBlur = 28;
-    ctx.fillStyle = col;
-    ctx.fillText('★ ' + boss.poke.n.toUpperCase() + ' ★', W / 2, H * 0.42);
+    fitLabel('★ ' + boss.poke.n.toUpperCase() + ' ★', W / 2, H * 0.42,
+      { size: 40, min: 20, weight: 900, color: col, maxW: W - 36, zone: 'field' });
     ctx.shadowBlur = 0;
-    ctx.font = '700 16px Orbitron, sans-serif';
-    ctx.fillStyle = '#fff';
-    ctx.fillText((boss.mythic ? 'MYTHICAL OF ' : boss.subBoss ? 'SENTINEL OF ' : 'GUARDIAN OF ') + genFor(G.level).name, W / 2, H * 0.42 + 40);
+    fitLabel((boss.mythic ? 'MYTHICAL OF ' : boss.subBoss ? 'SENTINEL OF ' : 'GUARDIAN OF ') + genFor(G.level).name,
+      W / 2, H * 0.42 + 40, { size: 16, min: 10, weight: 700, color: '#fff', maxW: W - 40, zone: 'field' });
     ctx.restore();
   }
 }
@@ -1805,15 +1838,19 @@ function drawPilotRig(x, py, preview = false) {
   // slow-breathing ring in radiant gold or umbral violet, brighter under Mega
   const affCol = affinityColor();
   if (affCol && !preview) {
-    const breathe = 0.55 + 0.25 * Math.sin(G.time * (mega ? 6 : 2.2));
+    // AFT-017: the halo follows the oath arc — a faint mark at Form I, the
+    // full breathing ring only at Form III. Reduced-effects stills the pulse
+    // but keeps the material progression.
+    const auraCh = oathCh('aura', G.starterLvl);
+    const breathe = SETTINGS.reduceFlash ? 0.65 : 0.55 + 0.25 * Math.sin(G.time * (mega ? 6 : 2.2));
     ctx.save();
-    ctx.globalAlpha = (mega ? 0.5 : 0.3) * breathe;
-    ctx.strokeStyle = affCol; ctx.lineWidth = mega ? 2.4 : 1.6;
+    ctx.globalAlpha = (mega ? 0.5 : 0.3) * breathe * (0.35 + 0.65 * auraCh);
+    ctx.strokeStyle = affCol; ctx.lineWidth = (mega ? 2.4 : 1.6) * (0.6 + 0.4 * auraCh);
     ctx.beginPath(); ctx.arc(x, y, s * (0.62 + 0.05 * breathe), 0, Math.PI * 2); ctx.stroke();
-    if (SETTINGS.affinity === 'light') { // radiant: four cardinal glints
+    if (SETTINGS.affinity === 'light' && (G.starterLvl || 1) >= 2) { // glints arrive at Form II
       ctx.fillStyle = affCol;
       for (let i = 0; i < 4; i++) {
-        const a = i * Math.PI / 2 + G.time * 0.5;
+        const a = i * Math.PI / 2 + (SETTINGS.reduceFlash ? 0 : G.time * 0.5);
         ctx.beginPath(); ctx.arc(x + Math.cos(a) * s * 0.64, y + Math.sin(a) * s * 0.64, 1.6, 0, Math.PI * 2); ctx.fill();
       }
     }
@@ -3517,7 +3554,10 @@ function drawParticles() {
     ctx.textAlign = 'center';
     ctx.fillStyle = f.color;
     ctx.shadowColor = '#000'; ctx.shadowBlur = 6;
-    ctx.fillText(f.text, f.x, f.y);
+    // AFT-001: floaters spawn at world coords — measure once, clamp on-screen
+    if (f._w == null) f._w = ctx.measureText(f.text).width;
+    f._cx = Math.max(f._w / 2 + 4, Math.min(W - f._w / 2 - 4, f.x));
+    ctx.fillText(f.text, f._cx, f.y);
     ctx.shadowBlur = 0;
   }
   ctx.globalAlpha = 1;
@@ -3539,6 +3579,13 @@ function wrapText(text, maxW) {
 function drawAnnounce() {
   const a = G.announce;
   if (!a) return;
+  // AFT-004: the pause overlay owns the whole screen — a TRIAL MODE or boss
+  // card bleeding through it is a layering bug. The card's timer is frozen
+  // while paused (update is gated), so it resumes cleanly on unpause.
+  if (paused && (G.state === 'play' || G.state === 'serve')) return;
+  // AFT-002: the reveal scene owns the frame — its panel IS the boss card;
+  // the strip would just bleed through the scrim underneath it.
+  if (G.reveal) return;
   // LIVE COMBAT never gets a banner in the flight lane: while playing,
   // everything but a hero announcement (boss-round reveals) renders as a
   // compact strip tucked under the HUD, sliding in from the top. The centre
@@ -3641,9 +3688,13 @@ function drawAnnounceStrip(a) {
   // bosses live — the strip was landing on the characters. It now rides the
   // LOW BAND between the formation floor and the ship's lane. Classic keeps
   // the under-HUD strip (its wall starts lower and the paddle owns the floor).
-  const y = G.mode !== 'classic'
+  // AFT-001: on SHORT viewports (375-tall landscape) the low-band formula
+  // wraps back into the top band and lands on the objective pill and the
+  // left HUD rows (combo/element/build end ~y116) — floor it below the whole
+  // banner cluster. Tall screens keep the original low-band placement.
+  const y = Math.max(SAFE_T + 120, G.mode !== 'classic'
     ? (G.mode === 'junkie' ? PADDLE_Y() - SHIP_BAND : PADDLE_Y()) - 78
-    : H < 560 ? H * 0.42 : SAFE_T + (W < 560 ? 150 : 88);
+    : H < 560 ? H * 0.42 : SAFE_T + (W < 560 ? 150 : 88));
   ctx.save();
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.translate(0, -14 * (1 - enter) * (1 - enter));
@@ -3721,7 +3772,7 @@ function drawShootHint() {
     ctx.save();
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = '800 15px Orbitron, sans-serif';
-    const tw2 = ctx.measureText(txt).width + 44;
+    const tw2 = Math.min(W - 24, ctx.measureText(txt).width + 44); // AFT-001: viewport cap
     const hy2 = H * 0.62;
     ctx.globalAlpha = pa;
     ctx.shadowColor = '#4dd0e1'; ctx.shadowBlur = 18;
@@ -4237,7 +4288,7 @@ function drawHUD() {
     // element readout renders that as NEUTRAL rather than a type.
     const el = hudElem ? attackElement() : G.ballElement;
     const elLabel = typeLabel(el);
-    ctx.fillStyle = el ? TYPE_COLORS[el] : '#b0bec5';
+    ctx.fillStyle = el ? TYPE_COLORS[el] : '#b0bec5'; // fitLabel keeps this fill
     ctx.font = '700 11px Orbitron, sans-serif';
     const basePartner = G.ballElementT > 1000 && G.starter && el === G.starter;
     const tag = hudElem
@@ -4247,15 +4298,16 @@ function drawHUD() {
       : elLabel + (G.mode === 'classic' ? ' BALL' : ' WEAPON') + (basePartner
         ? ' · ' + SKIN.strings.partnerWord
         : ' · POWER-UP · ' + Math.max(1, Math.ceil(G.ballElementT)) + 's');
-    ctx.fillText('⬤ ' + tag, 20, G.combo > 1 ? 90 : 72);
+    const tagB = fitLabel('⬤ ' + tag, 20, G.combo > 1 ? 90 : 72,
+      { size: 11, min: 8.5, weight: 700, align: 'left',
+        maxW: Math.min(W * 0.62, W - 110), zone: 'banner' });
     // AFFINITY chip rides the same line (light/dark skins): the path is
     // permanent run identity, so it lives beside the element, always visible
     const affCol = affinityColor();
     if (affCol) {
-      const tagW = ctx.measureText('⬤ ' + tag).width;
-      ctx.fillStyle = affCol;
-      ctx.fillText((SETTINGS.affinity === 'light' ? '  ☀ LIGHT' : '  ☾ DARK'),
-        20 + tagW + 6, G.combo > 1 ? 90 : 72);
+      fitLabel(SETTINGS.affinity === 'light' ? '☀ LIGHT' : '☾ DARK',
+        tagB.x1 + 8, G.combo > 1 ? 90 : 72,
+        { size: 11, min: 8.5, weight: 700, align: 'left', color: affCol, maxW: 70, zone: 'banner' });
     }
   }
   // skill tree at a glance — Phoenix-style: your build is always visible
@@ -4289,21 +4341,29 @@ function drawHUD() {
   drawRiftTracker();
   ctx.textAlign = 'center';
   const narrow = W < 560; // phones: wave title drops to the second HUD row
-  ctx.font = `900 ${Math.min(16, W / 30)}px Orbitron, sans-serif`;
-  ctx.fillStyle = '#e3f2fd';
   const gen = genFor(G.level);
   const stg = stageIdx(G.level);
-  const waveY = narrow ? 46 : (G.modifier ? 22 : 28);
+  // AFT-001: the title owns ONLY its free span — right of the score column,
+  // left of the health bar on row 1; on phones it takes row 2 fully BELOW the
+  // bar (y 48 clears the bar's bottom edge at 41). It can no longer collide
+  // with the health display at any width: fitLabel shrinks then ellipsizes.
+  const hbLeft = W - 18 - (narrow ? 112 : 154); // drawPlayerHealthBar geometry
+  const span0 = narrow ? 12 : 150, span1 = narrow ? W - 12 : hbLeft - 10;
+  const waveY = narrow ? 48 : (G.modifier ? 22 : 28);
   const waveText = G.secret.vmax ? 'SECRET RIFT · ' + SKIN.secret.name
     : (G.trial ? 'TRIAL · ' : '') + gen.name + ' ' + (stg + 1) + '/3 · ' + SKIN.stageNames[stg];
-  ctx.fillText(waveText, W / 2, waveY);
-  if (G.modifier && !narrow) {
-    ctx.font = '700 10px Orbitron, sans-serif';
-    ctx.fillStyle = G.modifier.color;
-    drawGlyph(ctx, G.modifier.icon, W / 2 - ctx.measureText(G.modifier.name).width / 2 - 12, 42, 6, G.modifier.color);
-    ctx.fillText(G.modifier.name, W / 2 + 4, 42);
+  fitLabel(waveText, (span0 + span1) / 2, waveY,
+    { size: Math.min(16, W / 30), min: 9.5, weight: 900, color: '#e3f2fd', maxW: span1 - span0, zone: 'topHud' });
+  // AFT-001: the modifier chip is SECONDARY copy — it yields its row to a
+  // live objective banner (the win condition) instead of stacking under it
+  const objLive = G.objective && !G.objective.done && !G.objective.failed;
+  if (G.modifier && !narrow && !objLive) {
+    const mb = fitLabel(G.modifier.name, (span0 + span1) / 2 + 4, 42,
+      { size: 10, min: 8.5, weight: 700, color: G.modifier.color, maxW: span1 - span0 - 28, zone: 'topHud' });
+    drawGlyph(ctx, G.modifier.icon, mb.x0 - 8, 42, 6, G.modifier.color);
   }
   drawPlayerHealthBar();
+  drawBossLane(); // AFT-002: the docked boss name/health lane
   ctx.restore(); // end of the top-anchored, safe-area-shifted cluster
   drawBrickBehaviorLegend();
   drawCombatNotice();
@@ -4397,7 +4457,8 @@ function drawBrickBehaviorLegend() {
   ctx.font = `800 ${W < 560 ? 8.5 : 9.5}px Orbitron, sans-serif`;
   const w = Math.min(W * 0.58, Math.max(172, ctx.measureText(label).width + 38));
   const elemRows = G.ballElement || G.mode === 'junkie';
-  const y = elemRows ? (G.combo > 1 ? 128 : 94) : (G.combo > 1 ? 110 : 72);
+  // AFT-001: this draws outside drawHUD's translate — add SAFE_T explicitly
+  const y = SAFE_T + (elemRows ? (G.combo > 1 ? 128 : 94) : (G.combo > 1 ? 110 : 72));
   const x = W / 2 - w / 2, h = 24;
   roundRect(x, y, w, h, 12);
   ctx.fillStyle = 'rgba(6,10,26,0.78)'; ctx.fill();
@@ -4424,7 +4485,9 @@ function drawObjectiveBanner() {
   // PROTECT objectives inline the friendly's remaining heart pips
   const fr = O.friendly;
   if (fr && !fr.dead) label += '  ·  ' + '♥'.repeat(Math.max(0, fr.fhp));
-  const y = short ? 44 : 52;
+  // AFT-001: SAFE_T (drawn outside the HUD translate) + collapse the
+  // SECONDARY readout before ever shrinking the primary objective name
+  const y = SAFE_T + (short ? 44 : 52);
   const w = Math.min(W * 0.72, (short ? 220 : 300));
   ctx.save();
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -4441,8 +4504,10 @@ function drawObjectiveBanner() {
     ctx.restore();
   }
   ctx.font = `900 ${short ? 9.5 : 11}px Orbitron, sans-serif`;
-  ctx.fillStyle = '#ffe082';
-  ctx.fillText('◎ ' + label + (readout ? '  ·  ' + readout : ''), W / 2, y + (short ? 13.5 : 15.5), w - 20);
+  let line = '◎ ' + label + (readout ? '  ·  ' + readout : '');
+  if (readout && ctx.measureText(line).width > w - 20) line = '◎ ' + label; // secondary copy collapses first
+  fitLabel(line, W / 2, y + (short ? 13.5 : 15.5),
+    { size: short ? 9.5 : 11, min: 8.5, weight: 900, color: '#ffe082', maxW: w - 20, zone: 'banner' });
   ctx.restore();
 }
 function drawCombatNotice() {
@@ -4453,7 +4518,7 @@ function drawCombatNotice() {
   // shooters: ride the LOW BAND under the announce strip, never the flock zone
   const y = G.mode !== 'classic'
     ? (G.mode === 'junkie' ? PADDLE_Y() - SHIP_BAND : PADDLE_Y()) - 42
-    : hasRule ? (elemRows ? (G.combo > 1 ? 160 : 126) : (G.combo > 1 ? 142 : 104)) : 70;
+    : SAFE_T + (hasRule ? (elemRows ? (G.combo > 1 ? 160 : 126) : (G.combo > 1 ? 142 : 104)) : 70);
   const alpha = Math.min(1, n.t / Math.min(0.25, n.max));
   ctx.save();
   ctx.globalAlpha = alpha;
@@ -4563,17 +4628,20 @@ function drawTouchControls() {
     // starts cooking — the state language stays explicit at every moment
     const resonantNow = full && G.chargeFullT > 0 && G.chargeFullT <= RESONANCE_WINDOW;
     const overNow = full && G.chargeFullT > 1.4;
-    const label = hot ? 'COOLING ' + Math.ceil(G.overheat) + 's'
+    // AFT-001: SHORT state words on the pad face — the explanatory clause
+    // lives on the sub-line, so nothing squishes inside the circle at any
+    // buttonScale. The pad still names its state at every moment.
+    const label = hot ? 'COOLING'
       : charging ? (resonantNow ? 'RESONANT!' : overNow ? 'OVERCHARGE' : full ? 'RELEASE!' : Math.round(Math.min(1, G.charge) * 100) + '%')
       : heatWarn ? 'HEAT HIGH'
-      : shooter ? (SETTINGS.autoFire ? 'AUTO ON' : 'TAP FIRE') : 'FIRE';
-    ctx.font = '900 9px Orbitron, sans-serif';
+      : shooter ? (SETTINGS.autoFire ? 'AUTO ON' : 'TAP') : 'FIRE';
+    ctx.font = '900 9.5px Orbitron, sans-serif';
     ctx.fillStyle = hot ? '#ff8a80' : charging ? (resonantNow ? '#80ffea' : overNow ? '#ffab66' : full ? '#e0ffff' : '#80deea') : heatWarn ? '#ffb74d' : '#b3e5fc';
     ctx.fillText(label, f.x, f.y + 12, f.r * 1.7);
     // second line: what HOLDING does right now (shooter modes only)
-    const sub = !shooter ? '' : hot ? 'LOCKED' : charging ? (full ? '' : 'KEEP HOLDING') : 'HOLD = CHARGE';
+    const sub = !shooter ? '' : hot ? Math.ceil(G.overheat) + 's · LOCKED' : charging ? (full ? '' : 'KEEP HOLDING') : 'HOLD = CHARGE';
     if (sub) {
-      ctx.font = '800 6.5px Orbitron, sans-serif';
+      ctx.font = '800 7px Orbitron, sans-serif';
       ctx.fillStyle = hot ? '#ff8a80' : charging ? '#b2ebf2' : heatWarn ? '#ffcc80' : '#90a4ae';
       ctx.fillText(sub, f.x, f.y + 23, f.r * 1.6);
     }
@@ -4647,6 +4715,226 @@ function fitText(text, y, baseSize, weight, color, maxW, family = 'Orbitron, san
   }
   ctx.fillStyle = color;
   ctx.fillText(text, W / 2, y, maxW);
+}
+
+// ── AFT-001: SAFE ZONES + FITTED LABELS ─────────────────────────────────────
+// The mobile screen is a stack of RESERVED bands; every fitted label belongs
+// to one. fitLabel is the one true containment primitive: shrink toward a
+// readable floor, then ELLIPSIZE — never rely on fillText's maxWidth squish
+// as the only strategy (it distorts glyphs instead of reflowing). It also
+// clamps its own bounds on-screen, so a world-anchored label near an edge
+// slides inward instead of clipping. Returns measured bounds for callers
+// (glyph placement, the dev overlay, the suite's containment assertions).
+let ZONE_DEBUG = /[?&]zones\b/.test(location.search);
+let zoneLog = null; // per-frame label bounds, collected only while debugging
+function uiZones() {
+  const hudH = 56 + SAFE_T;
+  const bannerH = 100; // objective banner / region rail / element rows lane
+  const shipTop = G.mode === 'junkie' ? PADDLE_Y() - SHIP_BAND : PADDLE_Y() - 46;
+  const z = {
+    topHud: { x: 0, y: 0, w: W, h: hudH },
+    banner: { x: 0, y: hudH, w: W, h: bannerH },
+    field: { x: 0, y: hudH + bannerH, w: W, h: Math.max(0, shipTop - hudH - bannerH) },
+    ship: { x: 0, y: shipTop, w: W, h: Math.max(0, FLOOR() - shipTop) },
+    controls: null,
+  };
+  if (IS_TOUCH) {
+    const B = touchButtons();
+    const bs = [B.fire, B.mega, B.pause, B.sound].filter(Boolean);
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const b of bs) { x0 = Math.min(x0, b.x - b.r); y0 = Math.min(y0, b.y - b.r); x1 = Math.max(x1, b.x + b.r); y1 = Math.max(y1, b.y + b.r); }
+    if (bs.length) z.controls = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+  return z;
+}
+function fitLabel(text, x, y, o = {}) {
+  const maxW = Math.max(24, o.maxW || W - 24);
+  const min = o.min || 9;
+  let size = o.size || 13;
+  const family = o.family || 'Orbitron, sans-serif';
+  const weight = o.weight || 800;
+  ctx.font = `${weight} ${size}px ${family}`;
+  let t = String(text);
+  let w = ctx.measureText(t).width;
+  if (w > maxW) { // 1) shrink toward the readable floor
+    size = Math.max(min, size * maxW / w);
+    ctx.font = `${weight} ${size}px ${family}`;
+    w = ctx.measureText(t).width;
+  }
+  if (w > maxW && t.length > 2) { // 2) at the floor: ellipsis, never squish
+    while (t.length > 1 && ctx.measureText(t.replace(/\s+$/, '') + '…').width > maxW) t = t.slice(0, -1);
+    t = t.replace(/\s+$/, '') + '…';
+    w = ctx.measureText(t).width;
+  }
+  const align = o.align || 'center';
+  let ax = x; // keep the label's own bounds on-screen wherever it was anchored
+  if (o.clamp !== false) {
+    if (align === 'center') ax = Math.max(w / 2 + 4, Math.min(W - w / 2 - 4, x));
+    else if (align === 'left') ax = Math.max(4, Math.min(W - w - 4, x));
+    else ax = Math.max(w + 4, Math.min(W - 4, x));
+  }
+  if (o.color) ctx.fillStyle = o.color;
+  const pa = ctx.textAlign;
+  ctx.textAlign = align;
+  ctx.fillText(t, ax, y, maxW); // maxWidth stays as belt-and-braces only
+  ctx.textAlign = pa;
+  const x0 = align === 'center' ? ax - w / 2 : align === 'right' ? ax - w : ax;
+  const b = { x0, x1: x0 + w, w, y, size, text: t };
+  if (zoneLog) { b.zone = o.zone || null; zoneLog.push(b); }
+  return b;
+}
+// dev overlay (?zones): zone bands + every fitted label's measured box; a
+// label outside the viewport or its declared band is flagged loud red.
+// NOTE: labels drawn inside the HUD's translate(0, SAFE_T) record local y.
+function drawZoneOverlay() {
+  if (!ZONE_DEBUG) return;
+  const z = uiZones();
+  const colors = { topHud: '#4dd0e1', banner: '#ffd54f', field: '#66bb6a', ship: '#ff8a65', controls: '#d780ff' };
+  ctx.save();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.font = '700 9px monospace';
+  for (const [name, r] of Object.entries(z)) {
+    if (!r) continue;
+    ctx.globalAlpha = 0.8; ctx.lineWidth = 1;
+    ctx.strokeStyle = colors[name] || '#fff';
+    ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+    ctx.fillStyle = colors[name] || '#fff';
+    ctx.fillText(name, r.x + 4, r.y + 3);
+  }
+  let vy = 64;
+  for (const b of (zoneLog || [])) {
+    const out = b.x0 < -0.5 || b.x1 > W + 0.5;
+    ctx.strokeStyle = out ? '#ff1744' : 'rgba(102,187,106,0.55)';
+    ctx.strokeRect(b.x0, b.y - b.size * 0.7, b.w, b.size * 1.4);
+    if (out) {
+      ctx.fillStyle = '#ff1744';
+      ctx.fillText('OUT ' + (b.zone || '?') + ' · ' + b.text.slice(0, 30), 8, vy);
+      vy += 11;
+    }
+  }
+  ctx.restore();
+}
+// ── AFT-002: THE BOSS REVEAL SCENE ──────────────────────────────────────────
+// Full-resolution portrait art (AETHERFALL_ART_REVEAL 512px exports on the
+// aetherfall skin; the skin's own largest sprite elsewhere), an info panel
+// that NEVER overlaps the art, a skippable hold, then the portrait flies
+// into the boss's combat rectangle. Reduced-effects mode dissolves in place.
+const revealImgCache = {};
+function bossRevealImage(id) {
+  if (revealImgCache[id]) return revealImgCache[id];
+  let img = null;
+  if (SKIN.id === 'aetherfall' && typeof AETHERFALL_ART_REVEAL !== 'undefined' && AETHERFALL_ART_REVEAL[id]) {
+    img = new Image();
+    img.src = AETHERFALL_ART_REVEAL[id];
+  } else img = getSprite(id);
+  revealImgCache[id] = img;
+  return img;
+}
+function drawRevealPortrait(id, cx, cy, side, alpha) {
+  let img = bossRevealImage(id);
+  if (!img || !img.complete || !img.naturalWidth) img = getSprite(id); // load gap → live sprite
+  if (!img || !(img.naturalWidth || img.width)) return;
+  const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+  const sc = Math.min(side / iw, side / ih);
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(img, cx - iw * sc / 2, cy - ih * sc / 2, iw * sc, ih * sc);
+  ctx.globalAlpha = 1;
+}
+function drawBossReveal() {
+  const r = G.reveal;
+  if (!r) return;
+  const primary = r.brs[0];
+  const col = TYPE_COLORS[primary.poke.t] || '#d780ff';
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  if (r.phase === 'hold') {
+    const enter = Math.min(1, r.t / 0.3);
+    const a = enter;
+    ctx.fillStyle = 'rgba(3,6,18,' + (0.74 * a).toFixed(3) + ')';
+    ctx.fillRect(0, 0, W, H);
+    // art zone: the largest square the safe area allows, panel BELOW the art
+    const panelH = 92;
+    const y0 = SAFE_T + 34;
+    const side = Math.max(120, Math.min(W - 48, H - y0 - panelH - SAFE_B - 52));
+    const pop = r.reduced ? 1 : 0.94 + 0.06 * (1 - Math.pow(1 - enter, 3));
+    const artCy = y0 + side / 2;
+    ctx.globalAlpha = a;
+    // a restrained ring stage behind the art — strokes only, no gradients
+    ctx.strokeStyle = col; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(W / 2, artCy, side * 0.52 * pop, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = a * 0.35;
+    ctx.beginPath(); ctx.arc(W / 2, artCy, side * 0.58 * pop, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
+    if (r.kind === 'sentinels' && r.ids.length > 1) {
+      const each = side * (r.ids.length === 2 ? 0.62 : 0.5) * pop;
+      const span = Math.min(W - 40, side * 1.3);
+      r.ids.forEach((id, i) => {
+        const fx2 = W / 2 + span * (i / (r.ids.length - 1) - 0.5);
+        drawRevealPortrait(id, fx2, artCy, each, a);
+      });
+    } else {
+      drawRevealPortrait(r.ids[0], W / 2, artCy, side * pop, a);
+    }
+    // the info panel — a dedicated band, never over the art
+    const py = y0 + side + 10;
+    ctx.globalAlpha = a;
+    fitLabel(r.title, W / 2, py + 16, { size: 24, min: 13, weight: 900, color: col, maxW: W - 56 });
+    fitLabel(r.sub, W / 2, py + 40, { size: 11.5, min: 9, weight: 700, color: '#e3f2fd', maxW: W - 64 });
+    ctx.font = bodyFont(11, 700);
+    fitLabel(r.cue, W / 2, py + 60, { size: 11, min: 8.5, weight: 700, color: '#ffe082', maxW: W - 64, family: 'Verdana, system-ui, sans-serif' });
+    if (r.t > 0.55) {
+      ctx.globalAlpha = a * (0.55 + 0.45 * Math.sin(G.time * 4));
+      fitLabel(IS_TOUCH ? 'TAP TO ENGAGE' : 'CLICK TO ENGAGE', W / 2, py + 80,
+        { size: 10, min: 9, weight: 800, color: '#90a4ae', maxW: W - 80 });
+    }
+  } else {
+    // FLY: the same art travels into the boss's combat rectangle while the
+    // scrim lifts; reduced mode is a dissolve at the destination instead
+    const k = Math.min(1, r.t / r.flyDur);
+    const e = k * k * (3 - 2 * k); // smoothstep
+    ctx.fillStyle = 'rgba(3,6,18,' + (0.74 * (1 - e)).toFixed(3) + ')';
+    ctx.fillRect(0, 0, W, H);
+    const panelH = 92;
+    const y0 = SAFE_T + 34;
+    const side = Math.max(120, Math.min(W - 48, H - y0 - panelH - SAFE_B - 52));
+    const artCy = y0 + side / 2;
+    const fade = 1 - Math.max(0, (k - 0.62) / 0.38); // cross-fade to the live sprite
+    r.brs.forEach((b, i) => {
+      if (!b || b.dead) return;
+      const tx = b.bx + G.fx, ty = b.by + G.fy;
+      const tSide = Math.max(60, b.w * 1.12);
+      let sx2 = W / 2, sSide = side;
+      if (r.kind === 'sentinels' && r.ids.length > 1) {
+        const span = Math.min(W - 40, side * 1.3);
+        sx2 = W / 2 + span * (i / (r.ids.length - 1) - 0.5);
+        sSide = side * (r.ids.length === 2 ? 0.62 : 0.5);
+      }
+      const cx = r.reduced ? tx : sx2 + (tx - sx2) * e;
+      const cy = r.reduced ? ty : artCy + (ty - artCy) * e;
+      drawRevealPortrait(b.poke.id, cx, cy, r.reduced ? tSide : sSide + (tSide - sSide) * e, fade);
+    });
+  }
+  ctx.restore();
+}
+// the docked boss lane: name · phase + a slim health bar in the HUD's own
+// band — the revealed boss carries NO floating nameplate over its art
+function drawBossLane() {
+  const id = G.revealDock;
+  if (!id || (G.state !== 'play' && G.state !== 'serve')) return;
+  const br = G.bricks.find(b => !b.dead && b.isBoss && b.poke.id === id);
+  if (!br) return;
+  const narrow = W < 560;
+  const x1 = W - 18, y = narrow ? 60 : 50;
+  const barW = narrow ? 112 : 154;
+  const frac = Math.max(0, br.hp / br.maxHp);
+  const pc = bossPhaseCount(br), ph = Math.min(pc, br.phase || 1);
+  fitLabel(br.poke.n.toUpperCase() + ' · ' + ph + '/' + pc, x1, y,
+    { size: 10, min: 8.5, weight: 900, color: ph >= pc ? '#ff8a80' : '#ffccbc', align: 'right', maxW: Math.min(W * 0.5, 230), zone: 'topHud' });
+  roundRect(x1 - barW, y + 8, barW, 6, 3);
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fill();
+  if (frac > 0) {
+    roundRect(x1 - barW, y + 8, Math.max(3, barW * frac), 6, 3);
+    ctx.fillStyle = ph >= pc ? '#ff5252' : '#ff8a65'; ctx.fill();
+  }
 }
 // The title is the start of a journey, not a dim pause screen. A painted route
 // crosses nine colourful regions behind the mode cards while a warm morning
@@ -5963,6 +6251,22 @@ function drawCeremony() {
           if (rim) { ctx.globalAlpha = 0.6; ctx.drawImage(rim, -sz / 2 - 3, -sz / 2 - 3, sz + 6, sz + 6); ctx.globalAlpha = 1; }
         }
         ctx.drawImage(img, -sz / 2, -sz / 2, sz, sz);
+        // AFT-017: the oath RESOLVES during the transformation — the sworn
+        // casting (new form's runes, materials, radiant blend) fades onto the
+        // freshly ascended hull instead of appearing before it
+        if (showNew && SKIN.affinities && SETTINGS.affinity) {
+          const oathK = Math.min(1, (t - 2.45) / 0.8);
+          const sworn = affinityVesselSprite(c.evo.toId, sz >= 96, false);
+          if (oathK > 0 && sworn && sworn !== img) {
+            ctx.globalAlpha = oathK;
+            if (!SETTINGS.reduceFlash) {
+              ctx.shadowColor = affinityColor();
+              ctx.shadowBlur = sz * 0.2 * oathK * oathCh('aura', vesselForm(c.evo.toId));
+            }
+            ctx.drawImage(sworn, -sz / 2, -sz / 2, sz, sz);
+            ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+          }
+        }
         if (!showNew && pulse > 0.55) { // tension pulses: white overlay flickers
           const sil = getSilhouette(c.evo.fromId, '#ffffff');
           if (sil) { ctx.globalAlpha = (pulse - 0.55) * 1.6; ctx.drawImage(sil, -sz / 2, -sz / 2, sz, sz); ctx.globalAlpha = 1; }
@@ -6185,14 +6489,16 @@ function drawAdvanced() {
   ctx.moveTo(cb.x + 10, cb.y + 10); ctx.lineTo(cb.x + cb.w - 10, cb.y + cb.h - 10);
   ctx.moveTo(cb.x + cb.w - 10, cb.y + 10); ctx.lineTo(cb.x + 10, cb.y + cb.h - 10);
   ctx.stroke();
-  for (let i = 0; i < 2; i++) {
+  for (let i = 0; i < 3; i++) {
     const r = A.tab(i), active = settingsPage === i;
     roundRect(r.x, r.y, r.w, r.h, 10);
     ctx.fillStyle = active ? 'rgba(66,165,245,0.26)' : 'rgba(255,255,255,0.05)'; ctx.fill();
     ctx.strokeStyle = active ? '#80d8ff' : 'rgba(255,255,255,0.15)'; ctx.lineWidth = active ? 2 : 1; ctx.stroke();
     ctx.font = `800 ${A.compact ? 9 : 10}px Orbitron, sans-serif`; ctx.fillStyle = active ? '#e3f2fd' : '#78909c';
-    ctx.fillText(i === 0 ? 'GAME' : 'TOUCH', r.x + r.w / 2, r.y + r.h / 2);
+    ctx.fillText(i === 0 ? 'GAME' : i === 1 ? 'TOUCH' : 'SAVE', r.x + r.w / 2, r.y + r.h / 2);
   }
+  // AFT-006: the SAVE page — export/import/restore + surfaced storage health
+  if (settingsPage === 2) { drawSaveSettings(A); ctx.restore(); return; }
   // sliders
   for (let i = 0; i < A.sliders.length; i++) {
     const s = A.sliders[i], gm = A.slider(i);
@@ -6230,6 +6536,60 @@ function drawAdvanced() {
     ctx.fillStyle = '#eceff1'; ctx.fill();
   }
   ctx.restore();
+}
+
+// AFT-006: export / import / restore, with the import PREVIEWED before any
+// write — the summary shows exactly what changes, section by section.
+function drawSaveSettings(A) {
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  if (importPreview) {
+    ctx.font = `900 ${A.compact ? 11 : 13}px Orbitron, sans-serif`;
+    ctx.fillStyle = '#ffd54f';
+    fitLabel('IMPORT PREVIEW — SAVED ' + String(importPreview.savedAt).slice(0, 10),
+      A.px + A.pw / 2, A.saveBtn(0).y - 14, { size: A.compact ? 10 : 11, min: 8.5, weight: 900, color: '#ffd54f', maxW: A.pw - 60 });
+    importPreview.summary.forEach((row, i) => {
+      const y = A.saveBtn(0).y + 8 + i * (A.compact ? 18 : 22);
+      ctx.font = bodyFont(A.compact ? 10 : 11, 700);
+      ctx.textAlign = 'left'; ctx.fillStyle = '#90a4ae';
+      ctx.fillText(row.label, A.px + 40, y);
+      ctx.textAlign = 'right'; ctx.fillStyle = '#e3f2fd';
+      ctx.fillText(row.cur + '  →  ' + row.inc, A.px + A.pw - 40, y);
+    });
+    ctx.textAlign = 'center';
+    for (const [i, label, col] of [[1.6, 'CONFIRM IMPORT', '#66bb6a'], [2.6, 'CANCEL', '#ff8a65']]) {
+      const r = A.saveBtn(i);
+      roundRect(r.x, r.y, r.w, r.h, 12);
+      ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fill();
+      ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
+      ctx.font = `800 ${A.compact ? 10 : 12}px Orbitron, sans-serif`; ctx.fillStyle = col;
+      ctx.fillText(label, r.x + r.w / 2, r.y + r.h / 2);
+    }
+    return;
+  }
+  const auto = loadStore(storeKey('autosave'), 'null');
+  const rows = [
+    ['EXPORT SAVE FILE', '#80d8ff'],
+    ['IMPORT SAVE FILE', '#ffd54f'],
+    ['RESTORE AUTOSAVE' + (auto ? '' : ' — NONE YET'), auto ? '#66bb6a' : '#546e7a'],
+  ];
+  rows.forEach(([label, col], i) => {
+    const r = A.saveBtn(i);
+    roundRect(r.x, r.y, r.w, r.h, 12);
+    ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fill();
+    ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.stroke();
+    ctx.font = `800 ${A.compact ? 10 : 12}px Orbitron, sans-serif`; ctx.fillStyle = col;
+    ctx.fillText(label, r.x + r.w / 2, r.y + r.h / 2);
+  });
+  // storage health, stated plainly — never a silent failure mode
+  const health = !STORAGE_HEALTH.writable ? ['STORAGE BLOCKED — RUNNING UNSAVED', '#ff8a65']
+    : STORAGE_HEALTH.durable === true ? ['STORAGE: DURABLE (EVICTION-PROTECTED)', '#66bb6a']
+    : STORAGE_HEALTH.durable === false ? ['STORAGE: BROWSER-MANAGED (MAY EVICT WHEN IDLE — EXPORT A FILE)', '#ffd54f']
+    : ['STORAGE: BROWSER-MANAGED', '#90a4ae'];
+  fitLabel(health[0], A.px + A.pw / 2, A.saveStatusY, { size: A.compact ? 9 : 10, min: 8, weight: 700, color: health[1], maxW: A.pw - 48 });
+  if (auto && auto.savedAt) {
+    fitLabel('AUTOSAVE: ' + String(auto.savedAt).slice(0, 19).replace('T', ' '),
+      A.px + A.pw / 2, A.saveStatusY + (A.compact ? 15 : 18), { size: A.compact ? 8.5 : 9.5, min: 8, weight: 600, color: '#78909c', maxW: A.pw - 48 });
+  }
 }
 
 function drawDex() {
@@ -8191,6 +8551,7 @@ function drawCursor() {
 }
 
 function render() {
+  zoneLog = ZONE_DEBUG ? [] : null; // AFT-001 dev overlay collection
   ctx.save();
   if (G.dramaticT > 0) { // last-brick slow-mo zoom
     const z = 1 + 0.035 * Math.sin(Math.min(1, (0.9 - G.dramaticT) / 0.25) * Math.PI / 2);
@@ -8220,9 +8581,11 @@ function render() {
   ctx.restore();
   // bloom the gameplay scene before the vignette darkens the edges
   if (G.state === 'play' || G.state === 'serve') drawBloom();
+  drawZoneOverlay(); // AFT-001 (?zones) — zone bands + fitted-label bounds
   if (vignette) ctx.drawImage(vignette, 0, 0, W, H); // may be unset pre-boot
   if (G.state !== 'menu' && G.state !== 'dex' && G.state !== 'upgrade' && G.state !== 'results') drawHUD();
   drawOverlays();
   if (G.state === 'menu' || G.state === 'dex') drawAnnounce(); // konami toast etc.
+  drawBossReveal(); // AFT-002: modal, above HUD and overlays
   drawCursor();
 }

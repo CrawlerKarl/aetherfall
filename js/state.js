@@ -165,8 +165,65 @@ function saveCheckpoint() {
     affinity: SETTINGS.affinity || null,
   };
   saveStore(storeKey('run'), RUN_CKPT);
+  writeAutosave(); // AFT-006: every region checkpoint refreshes the rolling autosave
 }
 function clearCheckpoint() { RUN_CKPT = null; saveStore(storeKey('run'), null); }
+
+// ── AFT-006: SAVE SAFETY — one versioned bundle, validated before writing ──
+// The bundle carries everything a campaign is: settings + music (global) and
+// the current skin's checkpoint/codex/medals/victories/best/daily/coach
+// state. Import NEVER writes an unknown key, NEVER writes a checkpoint that
+// fails migrateCheckpoint, and always snapshots a pre-import backup first.
+const EXPORT_SKIN_KEYS = ['run', 'best', 'victory', 'medals', 'dex', 'dexs', 'daily', 'jcoach'];
+const EXPORT_GLOBAL_KEYS = ['pkbrk-settings', 'pkbrk-music'];
+function exportBundle() {
+  const keys = {};
+  for (const k of EXPORT_GLOBAL_KEYS) { const v = loadStore(k, 'null'); if (v !== null) keys[k] = v; }
+  for (const b of EXPORT_SKIN_KEYS) { const k = storeKey(b); const v = loadStore(k, 'null'); if (v !== null) keys[k] = v; }
+  return { app: 'wavebreaker', v: 1, skin: SKIN.id, savedAt: new Date().toISOString(), keys };
+}
+function validateBundle(b) {
+  if (!b || typeof b !== 'object') return { ok: false, reason: 'NOT A SAVE FILE' };
+  if (b.app !== 'wavebreaker' || b.v !== 1) return { ok: false, reason: 'UNSUPPORTED SAVE VERSION' };
+  if (b.skin !== SKIN.id) return { ok: false, reason: 'THIS SAVE BELONGS TO THE ' + String(b.skin || '?').toUpperCase() + ' EDITION' };
+  if (!b.keys || typeof b.keys !== 'object' || Array.isArray(b.keys)) return { ok: false, reason: 'MALFORMED SAVE DATA' };
+  const allowed = new Set([...EXPORT_GLOBAL_KEYS, ...EXPORT_SKIN_KEYS.map(k => storeKey(k))]);
+  for (const k of Object.keys(b.keys)) {
+    if (!allowed.has(k)) return { ok: false, reason: 'UNRECOGNIZED KEY: ' + k.slice(0, 40) };
+  }
+  const runKey = storeKey('run');
+  if (b.keys[runKey] != null && !migrateCheckpoint(b.keys[runKey])) {
+    return { ok: false, reason: 'THE CHECKPOINT IN THIS SAVE IS UNREADABLE' };
+  }
+  // the preview: what changes, section by section — shown before any write
+  const curDex = loadStore(storeKey('dex'), '[]');
+  const incDex = b.keys[storeKey('dex')];
+  const curRun = loadStore(runKey, 'null');
+  const incRun = b.keys[runKey] != null ? migrateCheckpoint(b.keys[runKey]) : null;
+  const curMed = loadStore(storeKey('medals'), '{}');
+  const incMed = b.keys[storeKey('medals')];
+  const cnt = v => Array.isArray(v) ? v.length : (v && typeof v === 'object') ? Object.keys(v).length : 0;
+  const summary = [
+    { label: 'CHECKPOINT', cur: curRun ? 'WAVE ' + curRun.lvl : 'NONE', inc: incRun ? 'WAVE ' + incRun.lvl : 'NONE' },
+    { label: 'CODEX', cur: cnt(curDex) + ' LOGGED', inc: incDex != null ? cnt(incDex) + ' LOGGED' : 'KEPT' },
+    { label: 'MEDALS', cur: cnt(curMed) + ' STAGES', inc: incMed != null ? cnt(incMed) + ' STAGES' : 'KEPT' },
+    { label: 'BEST', cur: String(loadStore(storeKey('best'), '0') || 0), inc: b.keys[storeKey('best')] != null ? String(b.keys[storeKey('best')]) : 'KEPT' },
+  ];
+  return { ok: true, summary, savedAt: b.savedAt || '?' };
+}
+function applyBundle(b) {
+  saveStore(storeKey('preimport'), exportBundle()); // the recoverable pre-import backup
+  for (const [k, v] of Object.entries(b.keys)) saveStore(k, v);
+  return true;
+}
+function writeAutosave() { saveStore(storeKey('autosave'), exportBundle()); }
+function restoreAutosave() {
+  const b = loadStore(storeKey('autosave'), 'null');
+  const v = b && validateBundle(b);
+  if (!v || !v.ok) return false;
+  applyBundle(b);
+  return true;
+}
 let DAILY_RECORDS = (v => (v && typeof v === 'object' && !Array.isArray(v)) ? v : {})(loadStore(storeKey('daily'), '{}'));
 function dailyBest() { return Math.max(0, +(DAILY_RECORDS[dailyDateKey()] || 0)); }
 function dailyStreak() {
@@ -223,7 +280,7 @@ function resumeRun() {
   G.secretUpg = Object.assign({ heart: false, lens: false, echo: false }, c.secretUpg);
   setAnnounce('swift', '#80d8ff', 'JOURNEY RESUMED',
     genFor(c.lvl).name + ' · WAVE ' + c.lvl + ' — WELCOME BACK', 3,
-    'SAVED AT EVERY REGION · GAME OVER CLEARS THE SAVE');
+    'SAVED AT EVERY REGION · GAME OVER CLEARS THE SAVE', null, false, false, 'trial');
 }
 function freshSecretState() {
   return {
@@ -245,6 +302,7 @@ const G = {
   particles: [], floaters: [], fragments: [], ghosts: [], rings: [],
   scoreShown: 0, comboPop: 0, // HUD juice: counting score + combo pop-scale
   announce: null, announceQueue: [], modifier: null, combatNotice: null,
+  reveal: null, revealDock: null, // AFT-002: the boss-reveal scene + HUD-lane dock
   fx: 0, fy: 0, swayT: 0,
   brickW: 0, brickH: 0,
   shake: 0, flashT: 0, stateT: 0,
@@ -488,12 +546,46 @@ function romanTier(t) { return t >= 3 ? 'III' : t === 2 ? 'II' : ''; }
 // hero: keep the dramatic centre-card treatment even during live combat —
 // reserved for boss-round reveals. Everything else renders as a compact strip
 // under the HUD while playing, so no banner ever covers the pilot's lane.
-function setAnnounce(icon, color, name, desc, dur = 2.0, sub = null, spriteId = null, spriteShiny = false, hero = false) {
-  const next = { icon, color, name, desc, sub, t: dur, max: dur, spriteId, spriteShiny, hero };
+//
+// AFT-004 — the announce queue is a SINGLE-OWNER PRIORITY QUEUE now. Every
+// card carries a KIND; the queue orders by kind priority (stable FIFO within
+// a kind) so a boss reveal always outranks a trial notice outranks stage
+// flavor. Two kinds are SINGLETONS — 'boss' and 'trial': a new card of that
+// kind REPLACES any existing one (current or queued), so a round jump can
+// never stack two boss reveals and a launch always shows exactly one trial
+// notice. Kind also lets launches clear selectively (clearAnnouncements).
+const ANNOUNCE_PRIO = { boss: 5, trial: 4, objective: 3, region: 2, info: 1 };
+const ANNOUNCE_SINGLETON = { boss: true, trial: true };
+function setAnnounce(icon, color, name, desc, dur = 2.0, sub = null, spriteId = null, spriteShiny = false, hero = false, kind = null) {
+  // untagged hero cards are boss-lane drama by convention (the reveal path)
+  const k = kind || (hero ? 'boss' : 'info');
+  const next = { icon, color, name, desc, sub, t: dur, max: dur, spriteId, spriteShiny, hero, kind: k };
+  if (ANNOUNCE_SINGLETON[k]) {
+    // freshest wins: displace the old card of this kind wherever it lives
+    G.announceQueue = G.announceQueue.filter(a => a.kind !== k);
+    if (G.announce && G.announce.kind === k) { G.announce = next; return; }
+  }
   if (!G.announce) { G.announce = next; return; }
   if (G.announce.name === name || G.announceQueue.some(a => a.name === name)) return;
-  G.announceQueue.push(next);
-  if (G.announceQueue.length > 4) G.announceQueue.shift();
+  // stable priority insert: before the first strictly-lower-priority card
+  const prio = ANNOUNCE_PRIO[k] || 1;
+  let at = G.announceQueue.length;
+  for (let i = 0; i < G.announceQueue.length; i++) {
+    if ((ANNOUNCE_PRIO[G.announceQueue[i].kind] || 1) < prio) { at = i; break; }
+  }
+  G.announceQueue.splice(at, 0, next);
+  if (G.announceQueue.length > 4) G.announceQueue.pop(); // drop the lowest-priority tail
+}
+// Launch hygiene (AFT-004): jumping into a trial / gauntlet round / dev
+// launch must not inherit banners from earlier rounds. keepKinds preserves
+// what still applies (the TRIAL MODE notice survives a round jump; the
+// stale round-1 reveal does not).
+function clearAnnouncements(keepKinds = []) {
+  const keep = new Set(keepKinds);
+  if (G.announce && !keep.has(G.announce.kind)) G.announce = null;
+  G.announceQueue = G.announceQueue.filter(a => keep.has(a.kind));
+  if (!G.announce && G.announceQueue.length) G.announce = G.announceQueue.shift();
+  G.combatNotice = null;
 }
 
 function applyPower(p, srcType) {
@@ -879,7 +971,9 @@ function buildLevel(lvl) {
       setAnnounce('alert', gen.accent, 'THE ' + gen.name + ' GAUNTLET',
         'ROUND 1 — THE SENTINELS: ' + subs.map(x => SKIN.names[x[0]].toUpperCase()).join(' · '), 3.6,
         (G.mode === 'junkie' ? gauntletEntranceName(SKIN.sentinelEntranceStyles[rIdx]) + ' · ' : '') +
-          'THREE ROUNDS — 1 PHASE · 2 PHASES · 3 PHASES', null, false, true);
+          'THREE ROUNDS — 1 PHASE · 2 PHASES · 3 PHASES', null, false, true, 'boss');
+      // AFT-002: the round-1 reveal — the sentinel trio, one shared contract
+      beginBossReveal('sentinels', G.bricks.filter(b => b.subBoss && !b.dead));
     } else G.gauntlet = null;
     // pre-warm the boss's phase-tint silhouettes so the enrage transition
     // never pays a cache-miss hitch mid-fight
@@ -1322,15 +1416,15 @@ function buildLevel(lvl) {
     const actTag = regionsIn % 3 === 0 ? 'ACT ' + SKIN.acts[actIdx(lvl)].n + ': ' + SKIN.acts[actIdx(lvl)].name : null;
     const intro = SKIN.regionIntros[regionsIn % SKIN.regionIntros.length];
     setAnnounce(null, gen.accent, gen.name, intro ? intro.tag : 'STAGE 1/3 — ARRIVAL', 3.2,
-      [actTag, intro && intro.sub].filter(Boolean).join('  ·  '), null, false, true);
+      [actTag, intro && intro.sub].filter(Boolean).join('  ·  '), null, false, true, 'region');
     SFX.regionIntro();
   } else if (G.modifier) {
     const m = G.modifier;
     setAnnounce(m.icon, m.color, m.name, m.desc, 3.2,
-      [gen.name + ' 2/3', form && form.name + ' FORMATION', theme.name].filter(Boolean).join(' · '));
+      [gen.name + ' 2/3', form && form.name + ' FORMATION', theme.name].filter(Boolean).join(' · '), null, false, false, 'region');
   } else {
     setAnnounce(null, gen.accent, gen.name, 'STAGE 2/3 — CHALLENGE', 2.4,
-      [form && form.name + ' FORMATION', theme.name].filter(Boolean).join(' · '));
+      [form && form.name + ' FORMATION', theme.name].filter(Boolean).join(' · '), null, false, false, 'region');
   }
   // hard readability cap: random form-skips + stream squads can land the
   // walled modes a brick or two over budget — trim boxed filler to the cap
@@ -1493,6 +1587,7 @@ function resetRun(startLevel = 1, trial = false, opts = {}) {
   G.adapt = 1; G.mega = 0; G.megaT = 0; G.ballElement = null;
   G.fx_fire = G.fx_laser = G.fx_wide = G.fx_slow = G.fx_magnet = G.fx_score = G.fx_draco = null;
   G.shieldCharges = 0; G.shieldFlash = 0; G.surgeFlash = 0; G.hurtHud = 0; G.announce = null; G.announceQueue = []; G.combatNotice = null;
+  G.reveal = null; G.revealDock = null;
   G.upg = {}; G.path = {}; G.catchBonus = 0; G.upgradeChoices = null;
   G.calibReturns = 0; G.calibShots = 0; G.lensKills = 0; G.vortexes = [];
   G.salvageCount = 0; G.salvageStored = 0; G.rescueN = 0; G.reactiveCD = 0; G.reactorUsed = false;
@@ -1572,11 +1667,11 @@ function resetRun(startLevel = 1, trial = false, opts = {}) {
     G.announce = null; G.announceQueue = [];
     if (G.daily) setAnnounce('star', '#ffd54f', 'DAILY CHALLENGE · ' + dailyDateKey(),
       'SAME WALLS · DROPS · STARTER · UPGRADES FOR EVERY PLAYER', 3.4,
-      'LOCAL BEST ' + dailyBest() + ' · ONE SEEDED JOURNEY');
+      'LOCAL BEST ' + dailyBest() + ' · ONE SEEDED JOURNEY', null, false, false, 'trial');
     else setAnnounce('swift', '#80d8ff', 'TRIAL MODE',
       genFor(startLevel).name + ' · ' + SKIN.stageNames[stageIdx(startLevel)] + ' — SCORE & CATCHES NOT SAVED', 3,
-      granted ? granted + ' UPGRADES GRANTED FOR THE JOURNEY SO FAR' : null);
-    encounterCards.forEach(a => setAnnounce(a.icon, a.color, a.name, a.desc, a.max, a.sub, a.spriteId, a.spriteShiny));
+      granted ? granted + ' UPGRADES GRANTED FOR THE JOURNEY SO FAR' : null, null, false, false, 'trial');
+    encounterCards.forEach(a => setAnnounce(a.icon, a.color, a.name, a.desc, a.max, a.sub, a.spriteId, a.spriteShiny, a.hero, a.kind));
   }
 }
 function startDailyRun() {

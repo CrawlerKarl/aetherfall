@@ -736,7 +736,8 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
       }
       setAnnounce('alert', lastStand ? '#ff1744' : '#ff5252',
         br.poke.n.toUpperCase() + (lastStand ? ' — LAST STAND!' : ' IS ENRAGED!'),
-        lastStand ? 'RELENTLESS FIRE · GUARDS INBOUND — FINISH IT' : 'FASTER, SPREADING ATTACKS', 2.4);
+        lastStand ? 'RELENTLESS FIRE · GUARDS INBOUND — FINISH IT' : 'FASTER, SPREADING ATTACKS', 2.4,
+        null, null, false, false, 'boss');
       haptic('boss');
     }
   }
@@ -2654,7 +2655,7 @@ function completeProtect(O, name) {
   disperseSwarm();
   statsObjective(O.type, true);
   setAnnounce('star', '#ffd54f', name, 'THE FLOCK SCATTERS — THE SKY IS YOURS', 2.8,
-    null, null, false, true);
+    null, null, false, true, 'objective');
   SFX.levelUp(); haptic('boss');
 }
 // the traveler / relay fell: the objective FAILS (the first fail state). No
@@ -2665,7 +2666,8 @@ function friendlyFaints(fr) {
   fr.dead = true;
   shatterBrick(fr, fr.bx + G.fx, fr.by + G.fy, true); // bare faint
   if (O) { O.failed = true; statsObjective(O.type, false); }
-  setAnnounce('star', '#ff80ab', 'THE TRAVELER FELL — CLEAR THE WAVE!', '', 2.4);
+  setAnnounce('star', '#ff80ab', 'THE TRAVELER FELL — CLEAR THE WAVE!', '', 2.4,
+    null, null, false, false, 'objective');
   SFX.hit(0); haptic('hit');
 }
 function updateObjective(dt) {
@@ -2709,7 +2711,7 @@ function updateObjective(dt) {
       G.enemyShots = G.enemyShots.filter(s => s.boss); // the swarm's fire scatters too
       G.reinforce = 0; // outlasting the swarm ENDS the stage — no grind wave after
       setAnnounce('star', '#ffd54f', 'MIGRATION SURVIVED!', 'THE FLOCK PASSES — THE SKY IS YOURS', 2.8,
-        null, null, false, true);
+        null, null, false, true, 'objective');
       SFX.levelUp(); haptic('boss');
     }
   }
@@ -2746,11 +2748,70 @@ function spawnBonusFlock() {
   setAnnounce('swift', '#80d8ff', bf.name, bf.sub, 2.4);
   SFX.power();
 }
+// ---- AFT-002: THE BOSS REVEAL — a separate scene, not a combat layer ----
+// Freeze combat, show the full-resolution portrait with a dedicated info
+// panel (name/round/realm/phases/one counterplay cue), hold skippably, then
+// fly the art into the boss's combat rectangle and dock the name/health to a
+// HUD lane. Hostile simulation resumes only after docking, with a fire grace
+// so a skip can never land the player inside an undodgeable attack. ONE
+// contract for sentinels, legendaries, mythicals and the secret boss.
+function beginBossReveal(kind, brs) {
+  brs = (brs || []).filter(Boolean);
+  if (!brs.length) return;
+  // the invariant suite drives update() headless — reveals arm only for real
+  // sessions (or the dedicated reveal test, which opts back in)
+  if (typeof window !== 'undefined' && window.__SUITE && !window.__SUITE_REVEALS) return;
+  const reduced = !!SETTINGS.reduceFlash; // reduced-effects: dissolve, no sweep
+  const gen = genFor(G.level);
+  const primary = brs[0];
+  const cue = kind === 'sentinels' ? 'STRIKE THE ONE THAT JUST ATTACKED — IT IS OPEN'
+    : kind === 'secret' ? 'DODGE MAX MIRAGE · WIN A FORBIDDEN UPGRADE'
+    : kind === 'mythic' ? 'THREE PHASES · DENY ITS SUMMONS — TWO HITS EACH'
+    : blasterArmed() ? 'A CHARGED SHOT BREAKS ITS CHANNEL'
+    : 'THE BALL IS YOUR ONLY WEAPON — KEEP THE HIGH GROUND';
+  const roleLine = kind === 'sentinels' ? 'ROUND 1 — THE SENTINELS'
+    : kind === 'legendary' ? 'ROUND 2 — THE LEGENDARY'
+    : kind === 'secret' ? 'MAX RIFT — THE SECRET BOSS' : 'FINAL ROUND — THE MYTHICAL';
+  G.reveal = {
+    kind, brs, ids: brs.map(b => b.poke.id), t: 0, phase: 'hold',
+    holdDur: reduced ? 1.5 : 2.4, flyDur: reduced ? 0.28 : 0.65, reduced,
+    title: brs.map(b => b.poke.n.toUpperCase()).join(' · '),
+    sub: roleLine + ' · ' + gen.name + ' · ' + bossPhaseCount(primary) + (bossPhaseCount(primary) > 1 ? ' PHASES' : ' PHASE'),
+    cue,
+  };
+}
+function revealSkip() { // tap: skip the hold, never the information
+  const r = G.reveal;
+  if (r && r.phase === 'hold' && r.t > 0.35) { r.phase = 'fly'; r.t = 0; }
+}
+function updateReveal(dt) {
+  const r = G.reveal;
+  r.t += dt;
+  if (r.phase === 'hold') {
+    if (r.t >= r.holdDur) { r.phase = 'fly'; r.t = 0; }
+    return;
+  }
+  if (r.t < r.flyDur) return;
+  // the transform is complete: dock the lane, free the announce lane (the
+  // reveal DELIVERED the boss card's content), arm the restart grace
+  G.reveal = null;
+  if (r.kind !== 'sentinels') G.revealDock = r.ids[0];
+  if (G.announce && G.announce.kind === 'boss') G.announce = null;
+  G.announceQueue = G.announceQueue.filter(a => a.kind !== 'boss');
+  if (!G.announce && G.announceQueue.length) G.announce = G.announceQueue.shift();
+  G.enemyShotCD = Math.max(G.enemyShotCD || 0, 1.2);
+  for (const b of r.brs) if (b && !b.dead) b.abilityCD = Math.max(b.abilityCD || 0, 1.6);
+}
 // ---- gauntlet round transitions — used by the controller AND trial jumps
 // Jump a freshly built legendary stage straight to a later gauntlet round:
 // Shared by the trial picker, the dev launcher, and the boss test harness.
 function jumpToGauntletRound(round, phase) {
   if (!(round > 0) || !G.gauntlet) return;
+  // AFT-004: banners/entrances/story cards from earlier rounds do not follow
+  // a jump — only the run-level trial notice survives; the wake/summon below
+  // queues exactly ONE boss reveal for the selected round.
+  clearAnnouncements(['trial']);
+  G.telegraphs = []; G.enemyShots = []; G.columnStrikes = [];
   for (const b of G.bricks) if (b.subBoss) b.dead = true;
   gauntletWake();
   if (round >= 2) {
@@ -2798,6 +2859,7 @@ function gauntletWake() {
   setAnnounce('alert', TYPE_COLORS[gen2.boss.t], gen2.boss.n.toUpperCase() + ' DESCENDS!',
     'ROUND 2 — THE LEGENDARY' + (G.mode === 'junkie' ? ' · 2 PHASES' : ''), 3,
     G.mode === 'junkie' ? gauntletEntranceName(legendStyle) : null, null, false, true);
+  beginBossReveal('legendary', [legend]); // AFT-002
 }
 function gauntletSummonMythic(forceSecret = false) {
   const gj = G.gauntlet;
@@ -2825,7 +2887,8 @@ function gauntletSummonMythic(forceSecret = false) {
     else { G.enemyShots = []; G.telegraphs = []; G.columnStrikes = []; G.bossIntro = 1.8; }
     G.shake = 16; G.freeze = Math.max(G.freeze, 0.18); G.flashT = Math.max(G.flashT, 0.2);
     SFX.roar();
-    G.announce = null; G.announceQueue = [];
+    clearAnnouncements(['trial']);
+    beginBossReveal('secret', [vmax]); // AFT-002
     setAnnounce('fairy', '#d780ff', SKIN.secret.announce,
       SKIN.secret.announceSub, 4,
       'MAX RIFT · DODGE MAX MIRAGE · WIN A FORBIDDEN UPGRADE', null, false, true);
@@ -2856,6 +2919,7 @@ function gauntletSummonMythic(forceSecret = false) {
   setAnnounce('fairy', '#ff80ab', SKIN.names[mid].toUpperCase() + ' — THE MYTHICAL!',
     'FINAL ROUND · 3 PHASES — A NEW KIND OF FIGHT', 3.2,
     G.mode === 'junkie' ? gauntletEntranceName(mythStyle) : null, null, false, true);
+  beginBossReveal('mythic', [myth]); // AFT-002
 }
 
 function updateSpriteKinematics(dt) {
@@ -2913,6 +2977,15 @@ function update(dt) {
     if (G.announce.t <= 0) G.announce = G.announceQueue.length ? G.announceQueue.shift() : null;
   }
   musicTick();
+  // AFT-006: blocked storage is said OUT LOUD, once — never silent loss
+  if (!STORAGE_HEALTH.writable && !STORAGE_HEALTH.noticed) {
+    STORAGE_HEALTH.noticed = true;
+    setAnnounce('alert', '#ff8a65', 'RUNNING UNSAVED',
+      'STORAGE IS BLOCKED — PROGRESS WILL NOT SURVIVE THIS SESSION', 4.5);
+  }
+  // AFT-002: the reveal scene owns the frame — combat is frozen until the
+  // portrait lands and the HUD lane docks (update returns; render draws it)
+  if (G.reveal && (G.state === 'play' || G.state === 'serve')) { updateReveal(dt); return; }
 
   // STARFIGHTER's pilot is a small mon — its edge clamp is the SHIP's half
   // width, never paddleW(): Tailwind/WIDE inflate the paddle stat to ~300px,
