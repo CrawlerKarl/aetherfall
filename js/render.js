@@ -1237,6 +1237,10 @@ function drawBricks() {
     const col = TYPE_COLORS[br.poke.t];
     const smallCard = br.w < 72; // mobile-sized cards get minimal overlays
     const tinyCard = br.w < 44;  // late-game horde cards: sprite + frame only
+    // AFT-020 raid/hunt props carry no sprite id — they draw procedurally
+    if (br.raidVine) { drawRaidVine(br, x, y); continue; }
+    if (br.raidCover) { drawRaidCover(br, x, y); continue; }
+    if (br.glassCell || br.lucPrison) { drawGlassCell(br, x, y); continue; }
     // NB: br.flash is decayed in update() (dt-scaled) — render only READS it.
     // banking through its pattern with a type-colored aura underneath.
     // Divers and once-dived (bare) blocks shattered their box too: NOTHING
@@ -1410,7 +1414,13 @@ function drawBricks() {
     }
     if (br.isBoss) {
       if (G.mode === 'classic') drawBossBrick(br, x, y);
-      else drawBossMon(br, x, y);
+      else if (br.hourOut) {
+        // an OUT-OF-HOUR actor is a pale past — ghosted until the hours trade
+        ctx.save();
+        ctx.globalAlpha *= 0.38;
+        drawBossMon(br, x, y);
+        ctx.restore();
+      } else drawBossMon(br, x, y);
       continue;
     }
     ctx.save();
@@ -2731,6 +2741,643 @@ function drawRallyZone() {
 }
 
 // warning lines before enemy fire + Zekrom/Eternatus column beams
+// AFT-020 THE GALE RELAY: the wind corridor (two dashed rails + downwind
+// chevrons — shape and motion, never color alone) and the carrier read
+// (bright core orb on the carrier, dashed gray shimmer on the other Vows).
+// Strokes and fills only — nothing here allocates gradients or shadowBlur.
+function drawRelayFx() {
+  const F = G.finale;
+  if (!F || !F.relay || F.beat !== 0 || F.mastery.clear) return;
+  if (G.state !== 'play' && G.state !== 'serve') return;
+  const rl = relayLane();
+  if (rl) {
+    const x0 = rl.x - rl.w / 2, x1 = rl.x + rl.w / 2;
+    const yTop = SAFE_T + 92;
+    const yBot = G.mode === 'junkie' ? shipY() + 44 : PADDLE_Y() - 6;
+    ctx.save();
+    ctx.setLineDash([10, 8]);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(128,216,255,0.5)';
+    ctx.beginPath();
+    ctx.moveTo(x0, yTop); ctx.lineTo(x0, yBot);
+    ctx.moveTo(x1, yTop); ctx.lineTo(x1, yBot);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // downwind chevrons OUTSIDE the lane — they travel with the gale
+    ctx.strokeStyle = 'rgba(197,225,235,0.42)';
+    ctx.lineWidth = 1.6;
+    const span = Math.max(1, yBot - yTop - 80);
+    for (let i = 0; i < 5; i++) {
+      const yy = yTop + 40 + (i * span) / 4;
+      const sway = ((G.time * 90 + i * 37) % 64);
+      for (const side of [-1, 1]) {
+        const bx = rl.x + side * (rl.w / 2 + 30) + rl.dir * sway * 0.7;
+        ctx.beginPath();
+        ctx.moveTo(bx - rl.dir * 8, yy - 5);
+        ctx.lineTo(bx, yy);
+        ctx.lineTo(bx - rl.dir * 8, yy + 5);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+  const car = relayCarrierBrick();
+  for (const v of relayAliveVows()) {
+    const vx2 = v.bx + G.fx, vy2 = v.by + G.fy;
+    const r = Math.max(v.w, v.h) * 0.6;
+    ctx.save();
+    if (v === car) {
+      const pulse = 0.75 + 0.25 * Math.sin(G.time * 5);
+      ctx.lineWidth = 2.6;
+      ctx.strokeStyle = 'rgba(64,196,255,' + (0.55 + 0.3 * pulse) + ')';
+      ctx.beginPath(); ctx.arc(vx2, vy2, r + 6, 0, Math.PI * 2); ctx.stroke();
+      // the storm core itself rides above the carrier
+      const oy = vy2 - v.h * 0.78;
+      ctx.beginPath(); ctx.arc(vx2, oy, 7 * pulse + 3, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(64,196,255,0.85)'; ctx.fill();
+      ctx.beginPath(); ctx.arc(vx2, oy, 3.4, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff'; ctx.fill();
+    } else {
+      ctx.setLineDash([6, 6]);
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = 'rgba(176,190,197,0.55)';
+      ctx.beginPath(); ctx.arc(vx2, vy2, r + 4, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
+}
+// AFT-020 THE FIRST COVENANT: the TRIUNE WARD linking the living Heralds
+// — three make a triangle, two a strained line, one stands alone. The gap
+// a fallen Herald leaves is literally visible in the shape.
+function drawWardFx() {
+  const F = G.finale;
+  if (!F || !F.ward || F.beat !== 0 || F.mastery.clear) return;
+  if (G.state !== 'play' && G.state !== 'serve') return;
+  const heralds = G.bricks.filter(b => !b.dead && b.subBoss);
+  if (heralds.length < 2) return;
+  ctx.save();
+  ctx.setLineDash([9, 8]);
+  ctx.lineDashOffset = -(G.time * 24) % 17;
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(140,224,138,0.5)';
+  ctx.beginPath();
+  for (let i = 0; i < heralds.length; i++) {
+    const a = heralds[i], b = heralds[(i + 1) % heralds.length];
+    if (heralds.length === 2 && i === 1) break; // two survivors: one strained line
+    ctx.moveTo(a.bx + G.fx, a.by + G.fy);
+    ctx.lineTo(b.bx + G.fx, b.by + G.fy);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+// AFT-020 THE FIRST FUSION: the charge's warning band + runner streak, and
+// the chains binding the linked pair (each break leaves a visible stub).
+function drawChaseFx() {
+  const F = G.finale;
+  if (!F || F.format !== 'chase' || !F.chase || F.mastery.clear) return;
+  if (G.state !== 'play' && G.state !== 'serve') return;
+  const C = F.chase;
+  const R = C.rush;
+  ctx.save();
+  if (R) {
+    if (!R.fired) {
+      const prog = Math.min(1, R.t / R.warn);
+      ctx.globalAlpha = 0.16 + 0.22 * prog;
+      ctx.fillStyle = '#ff8a80';
+      ctx.fillRect(0, R.y - 34, W, 68);
+      ctx.globalAlpha = 0.7;
+      ctx.setLineDash([12, 10]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#ff8a80';
+      ctx.beginPath();
+      ctx.moveTo(0, R.y - 34); ctx.lineTo(W, R.y - 34);
+      ctx.moveTo(0, R.y + 34); ctx.lineTo(W, R.y + 34);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // the runner crouches at its entry edge
+      const ex = R.dir > 0 ? 18 : W - 18;
+      ctx.beginPath();
+      ctx.moveTo(ex, R.y - 12); ctx.lineTo(ex + R.dir * 22, R.y); ctx.lineTo(ex, R.y + 12);
+      ctx.closePath();
+      ctx.fillStyle = '#ff8a80'; ctx.globalAlpha = 0.5 + 0.4 * Math.sin(G.time * 10); ctx.fill();
+    } else if (R.x != null) {
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = '#ffcf5e';
+      ctx.beginPath();
+      ctx.moveTo(R.x, R.y - 16); ctx.lineTo(R.x + R.dir * 40, R.y); ctx.lineTo(R.x, R.y + 16);
+      ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = 0.35;
+      ctx.fillRect(R.dir > 0 ? R.x - 160 : R.x, R.y - 5, 160, 10);
+    }
+  }
+  if (F.beat === 2) {
+    const pair = G.bricks.filter(b => b.chaseLinked && !b.dead);
+    if (pair.length === 2) {
+      const [a, b] = pair;
+      // the chains: three strands, broken ones hang as stubs
+      for (let i = 0; i < 3; i++) {
+        const off = (i - 1) * 14;
+        const broken = i < C.chains;
+        ctx.lineWidth = broken ? 1.4 : 2.6;
+        ctx.strokeStyle = broken ? 'rgba(176,190,197,0.3)' : 'rgba(255,207,94,0.7)';
+        ctx.setLineDash(broken ? [3, 9] : [9, 6]);
+        ctx.beginPath();
+        ctx.moveTo(a.bx + G.fx, a.by + G.fy + off);
+        if (broken) ctx.lineTo(a.bx + G.fx + (b.bx - a.bx) * 0.25, a.by + G.fy + off + 18);
+        else ctx.lineTo(b.bx + G.fx, b.by + G.fy + off);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+  }
+  ctx.restore();
+}
+// AFT-020 THE ECLIPSE RITE: each totem wears its rite (the rotating
+// opening's gap, the pulse flash, the growing root bar), the moon state
+// reads as a FILLED vs HOLLOW crescent by the banner, and the thief
+// carries the stolen power as a visible violet charge.
+function drawRiteFx() {
+  const F = G.finale;
+  if (!F || F.format !== 'rite' || !F.rite || F.mastery.clear) return;
+  if (G.state !== 'play' && G.state !== 'serve') return;
+  const R = F.rite;
+  ctx.save();
+  if (F.beat === 0) {
+    for (const b of G.bricks) {
+      if (b.dead || !b.totem) continue;
+      const bx2 = b.bx + G.fx, by2 = b.by + G.fy;
+      const r = Math.max(b.w, b.h) * 0.66;
+      if (b.riteKind === 'opening') {
+        const gapA = (G.time * 0.9) % (Math.PI * 2);
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(90,255,195,0.6)';
+        ctx.beginPath();
+        ctx.arc(bx2, by2, r + 6, gapA + 0.55, gapA - 0.55 + Math.PI * 2);
+        ctx.stroke();
+      } else if (b.riteKind === 'pulse') {
+        const on = ((F.beatT + (b.subIdx || 0)) % 1.4) < 0.38;
+        ctx.lineWidth = on ? 3.4 : 1.6;
+        ctx.strokeStyle = on ? 'rgba(90,255,195,0.85)' : 'rgba(90,255,195,0.3)';
+        ctx.beginPath(); ctx.arc(bx2, by2, r + 6 + (on ? 3 : 0), 0, Math.PI * 2); ctx.stroke();
+      } else {
+        ctx.fillStyle = 'rgba(124,179,66,0.8)';
+        ctx.fillRect(bx2 - r, by2 + r + 6, r * 2 * Math.min(1, b.riteRoot || 0), 5);
+        ctx.lineWidth = 1.4;
+        ctx.strokeStyle = 'rgba(124,179,66,0.7)';
+        ctx.strokeRect(bx2 - r, by2 + r + 6, r * 2, 5);
+      }
+    }
+  } else {
+    // the moon: FILLED crescent = bright rules; HOLLOW = dark rules
+    const mx = W / 2, my = SAFE_T + 86;
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = R.moon === 'bright' ? '#ffe082' : '#b388ff';
+    ctx.beginPath(); ctx.arc(mx, my, 10, Math.PI * 0.35, Math.PI * 1.65); ctx.stroke();
+    if (R.moon === 'bright') {
+      ctx.fillStyle = '#ffe082';
+      ctx.beginPath();
+      ctx.arc(mx, my, 10, Math.PI * 0.35, Math.PI * 1.65);
+      ctx.arc(mx + 5, my, 7, Math.PI * 1.5, Math.PI * 0.5, true);
+      ctx.fill();
+    }
+    const u = G.bricks.find(b => b.umbrix && !b.dead);
+    if (u && R.stolen > 0) {
+      const pulse = 0.7 + 0.3 * Math.sin(G.time * 6);
+      ctx.lineWidth = 2.6;
+      ctx.strokeStyle = 'rgba(179,136,255,' + (0.45 + 0.35 * pulse) + ')';
+      ctx.beginPath(); ctx.arc(u.bx + G.fx, u.by + G.fy, Math.max(u.w, u.h) * 0.66 + 5, 0, Math.PI * 2); ctx.stroke();
+      fitLabel('+' + Math.round(R.stolen * 100) + '%', u.bx + G.fx, u.by + G.fy - u.h * 0.75,
+        { size: 10, min: 8.5, weight: 900, color: '#b388ff', maxW: 60 });
+    }
+  }
+  ctx.restore();
+}
+// AFT-020 THE FALSE FOUNDATION: glass cells (solid truths vs dashed lies),
+// the closing wing-shaped shadow sector, and the prison facet.
+function drawHuntFx() {
+  const F = G.finale;
+  if (!F || F.format !== 'hunt' || !F.hunt || F.mastery.clear) return;
+  if (G.state !== 'play' && G.state !== 'serve') return;
+  const HT = F.hunt;
+  const S = HT.sector;
+  if (S) {
+    const prog = Math.min(1, S.t / S.dur);
+    ctx.save();
+    // the wing: a wedge whose EDGES sweep closed — shape and motion cue
+    const sweep = S.spread * (1 - prog * 0.55);
+    ctx.globalAlpha = 0.12 + 0.16 * prog;
+    ctx.fillStyle = '#7c4dff';
+    ctx.beginPath();
+    ctx.moveTo(S.cx, S.cy);
+    ctx.arc(S.cx, S.cy, S.rad, S.ang - sweep, S.ang + sweep);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 0.55 + 0.3 * prog;
+    ctx.lineWidth = 2.4;
+    ctx.strokeStyle = '#b388ff';
+    ctx.setLineDash([8, 7]);
+    ctx.beginPath();
+    ctx.moveTo(S.cx, S.cy);
+    ctx.lineTo(S.cx + Math.cos(S.ang - sweep) * S.rad, S.cy + Math.sin(S.ang - sweep) * S.rad);
+    ctx.moveTo(S.cx, S.cy);
+    ctx.lineTo(S.cx + Math.cos(S.ang + sweep) * S.rad, S.cy + Math.sin(S.ang + sweep) * S.rad);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+}
+// procedural glass props: a TRUE cell is solid with a bright core; a
+// REFLECTION is a dashed shell with an inverted hairline (the tell); the
+// prison is a larger facet holding a warm inner light.
+function drawGlassCell(br, x, y) {
+  ctx.save();
+  ctx.translate(x, y);
+  const w2 = br.w / 2, h2 = br.h / 2;
+  const path = () => {
+    ctx.beginPath();
+    ctx.moveTo(0, -h2); ctx.lineTo(w2, -h2 * 0.3); ctx.lineTo(w2 * 0.7, h2);
+    ctx.lineTo(-w2 * 0.7, h2); ctx.lineTo(-w2, -h2 * 0.3); ctx.closePath();
+  };
+  if (br.lucPrison) {
+    path();
+    ctx.fillStyle = 'rgba(255,158,203,0.3)'; ctx.fill();
+    ctx.lineWidth = 2.4; ctx.strokeStyle = '#ff9ecb'; ctx.stroke();
+    const pulse = 0.6 + 0.4 * Math.sin(G.time * 4);
+    ctx.beginPath(); ctx.arc(0, 0, 7 * pulse + 3, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,236,179,0.9)'; ctx.fill();
+  } else if (br.reflection) {
+    ctx.setLineDash([5, 5]);
+    path();
+    ctx.lineWidth = 1.6; ctx.strokeStyle = 'rgba(207,216,220,0.7)'; ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(w2 * 0.4, -h2 * 0.5); ctx.lineTo(-w2 * 0.2, h2 * 0.5); // the INVERTED hairline
+    ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.stroke();
+  } else {
+    path();
+    ctx.fillStyle = 'rgba(178,235,242,0.35)'; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = '#b2ebf2'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, 0, 3.4, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff'; ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-w2 * 0.4, -h2 * 0.5); ctx.lineTo(w2 * 0.2, h2 * 0.5);
+    ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.stroke();
+  }
+  if (br.flash > 0) {
+    ctx.globalAlpha = br.flash * 0.7;
+    ctx.lineWidth = 2; ctx.strokeStyle = '#fff';
+    path(); ctx.stroke();
+  }
+  ctx.restore();
+}
+// AFT-020 THE LIVE GRID: the circuit's COMPLETE route illuminates before
+// any electricity moves — a dashed polyline from the Sovereign through the
+// charged terminal to the endpoint lane, with the terminal's charge ring
+// filling as it's struck. The coda's Victory Flame trails a warm wake band.
+function drawCircuitFx() {
+  const F = G.finale;
+  if (!F || F.format !== 'circuit' || !F.circuit || F.mastery.clear) return;
+  if (G.state !== 'play' && G.state !== 'serve') return;
+  const C = F.circuit;
+  const A = C.active;
+  if (F.beat === 1 && A && !A.fired && A.node && !A.node.dead) {
+    const nx = A.node.bx + G.fx, ny = A.node.by + G.fy;
+    const prog = Math.min(1, A.t / A.illum);
+    ctx.save();
+    ctx.setLineDash([10, 8]);
+    ctx.lineDashOffset = -(G.time * 60) % 18; // the power FLOWS along the route
+    ctx.lineWidth = 2.6;
+    ctx.strokeStyle = 'rgba(255,209,102,' + (0.35 + 0.4 * prog) + ')';
+    ctx.beginPath();
+    ctx.moveTo(A.from.x, A.from.y);
+    ctx.lineTo(nx, ny);
+    ctx.lineTo(A.endX, Math.min(H - 60, ny + (H - ny) * 0.9));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // the charged terminal: a filling charge ring — break it to redirect
+    const pulse = 0.75 + 0.25 * Math.sin(G.time * 8);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(255,209,102,' + (0.5 + 0.4 * pulse) + ')';
+    ctx.beginPath();
+    ctx.arc(nx, ny, Math.max(A.node.w, A.node.h) * 0.62 + 6, -Math.PI / 2,
+      -Math.PI / 2 + Math.PI * 2 * ((A.hits || 0) / A.need));
+    ctx.stroke();
+    ctx.setLineDash([4, 5]);
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(nx, ny, Math.max(A.node.w, A.node.h) * 0.62 + 6, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // the endpoint lane preview (the strike itself is a warned columnStrike)
+    ctx.globalAlpha = 0.3 + 0.3 * prog;
+    ctx.fillStyle = '#ffd166';
+    ctx.fillRect(A.endX - A.w / 2, H - 46, A.w, 8);
+    ctx.restore();
+  }
+  if (F.beat === 2) {
+    const flame = G.bricks.find(b => b.victoryFlame && !b.dead);
+    if (flame) {
+      const fx2 = flame.bx + G.fx, fy2 = flame.by + G.fy;
+      const bandW = Math.max(120, W * 0.14);
+      ctx.save();
+      ctx.globalAlpha = 0.14 + 0.05 * Math.sin(G.time * 5);
+      ctx.fillStyle = '#ffd166';
+      ctx.fillRect(fx2 - bandW, fy2 - 20, bandW * 2, Math.max(60, H * 0.5));
+      ctx.restore();
+    }
+  }
+}
+// AFT-020 THE FRACTURED HOUR: the ring read (a golden arc over whichever
+// woken clock is RINGING — the Regent's open window), pale pre-echo rings
+// where a replay is about to fire, and the hour banner colors.
+function drawHourglassFx() {
+  const F = G.finale;
+  if (!F || F.format !== 'hourglass' || !F.hourglass || F.mastery.clear) return;
+  if (G.state !== 'play' && G.state !== 'serve') return;
+  const HG = F.hourglass;
+  let i = 0;
+  ctx.save();
+  for (const b of G.bricks) {
+    if (b.dead || !b.sibylAwake) continue;
+    const ringing = ((F.beatT + i * 2.5) % 5) < 3;
+    i++;
+    const bx2 = b.bx + G.fx, by2 = b.by + G.fy;
+    if (ringing && F.beat >= 1) {
+      const pulse = 0.7 + 0.3 * Math.sin(G.time * 7);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(255,213,79,' + (0.5 + 0.35 * pulse) + ')';
+      ctx.beginPath();
+      ctx.arc(bx2, by2 - b.h * 0.7, 12 + 4 * pulse, Math.PI * 1.15, Math.PI * 1.85);
+      ctx.stroke();
+    }
+  }
+  // pre-echo: the last 1.2s before a replay fires, a pale ring breathes at
+  // the recorded origin — the preview the plan demands
+  for (const r of HG.replayQ) {
+    const till = r.due - F.beatT;
+    if (till > 1.2) continue;
+    const a = 0.5 * (1 - till / 1.2);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(207,216,220,' + a + ')';
+    ctx.beginPath(); ctx.arc(r.x, r.y, 18 + (1.2 - till) * 20, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.restore();
+}
+// AFT-020 SIEGE: the pressure-seal tethers (each living Colossus → the
+// Sovereign) during the stations beat, then the CURRENT TRAIL — warm
+// pulsing rings while it burns, faint cool ones while it rests. Shape and
+// temperature of motion, never color alone (burning rings PULSE).
+function drawSiegeFx() {
+  const F = G.finale;
+  if (!F || F.format !== 'siege' || !F.siege || F.mastery.clear) return;
+  if (G.state !== 'play' && G.state !== 'serve') return;
+  const S = F.siege;
+  const sov = G.bricks.find(b => b.siegeSov && !b.dead);
+  if (F.beat === 0 && sov) {
+    ctx.save();
+    ctx.setLineDash([9, 8]);
+    ctx.lineDashOffset = -(G.time * 30) % 17;
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(90,215,210,0.5)';
+    for (const c of G.bricks) {
+      if (c.dead || !c.siegeColossus) continue;
+      ctx.beginPath();
+      ctx.moveTo(c.bx + G.fx, c.by + G.fy - c.h / 2);
+      ctx.lineTo(sov.bx + G.fx, sov.by + G.fy);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+  if (F.beat === 1 && S.trail.length) {
+    ctx.save();
+    const rr2 = S.trailR + S.weather.widen * 9;
+    for (const p2 of S.trail) {
+      const age = Math.min(1, p2.t / 0.5);
+      if (S.burns && S.taughtT <= 0) {
+        const pulse = 0.65 + 0.35 * Math.sin(G.time * 6 + p2.x * 0.02);
+        ctx.lineWidth = 2.6;
+        ctx.strokeStyle = 'rgba(255,110,90,' + (0.5 * age * pulse) + ')';
+        ctx.beginPath(); ctx.arc(p2.x, p2.y, rr2 * (0.8 + 0.2 * pulse), 0, Math.PI * 2); ctx.stroke();
+      } else {
+        ctx.lineWidth = 1.6;
+        ctx.strokeStyle = 'rgba(128,216,255,' + (0.22 * age) + ')';
+        ctx.beginPath(); ctx.arc(p2.x, p2.y, rr2 * 0.8, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+}
+// AFT-020 non-attrition objective reads: the ward triangle linking its
+// three sources (wardbreak) and the live lane's rails + the marked target's
+// diamond (lanes). Shape and motion cues, strokes only.
+function drawObjectiveFx() {
+  const O = G.objective;
+  if (!O || O.done || O.failed || (G.state !== 'play' && G.state !== 'serve')) return;
+  if (O.type === 'wardbreak') {
+    const srcs = G.bricks.filter(b => !b.dead && b.wardSrc);
+    if (!srcs.length) return;
+    ctx.save();
+    ctx.setLineDash([8, 7]);
+    ctx.lineDashOffset = -(G.time * 26) % 15;
+    ctx.strokeStyle = 'rgba(156,255,87,0.45)';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    for (let i = 0; i < srcs.length; i++) {
+      const a = srcs[i], b = srcs[(i + 1) % srcs.length];
+      if (srcs.length === 1) break;
+      ctx.moveTo(a.bx + G.fx, a.by + G.fy);
+      ctx.lineTo(b.bx + G.fx, b.by + G.fy);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    for (const s2 of srcs) {
+      const r = Math.max(s2.w, s2.h) * 0.62;
+      const pulse = 0.7 + 0.3 * Math.sin(G.time * 4 + s2.bx * 0.01);
+      ctx.lineWidth = 2.4;
+      ctx.strokeStyle = 'rgba(156,255,87,' + (0.4 + 0.4 * pulse) + ')';
+      ctx.beginPath(); ctx.arc(s2.bx + G.fx, s2.by + G.fy, r + 5, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  if (O.type === 'bells' && O.zones) {
+    const yB = G.mode === 'junkie' ? shipY() + 52 : PADDLE_Y() + 26;
+    for (let i = 0; i < O.zones.length; i++) {
+      const zx = O.zones[i];
+      const rung = i < O.rung, live = i === O.rung;
+      ctx.save();
+      // the bell arch: rung ones stay LIT (the scenery answers the play)
+      ctx.lineWidth = live ? 3 : 2;
+      ctx.strokeStyle = rung ? 'rgba(255,213,79,0.9)' : live ? 'rgba(255,213,79,0.75)' : 'rgba(176,190,197,0.35)';
+      ctx.beginPath();
+      ctx.arc(zx, yB, 16, Math.PI, 0);
+      ctx.moveTo(zx - 5, yB); ctx.lineTo(zx - 3, yB + 7);
+      ctx.moveTo(zx + 5, yB); ctx.lineTo(zx + 3, yB + 7);
+      ctx.stroke();
+      ctx.beginPath(); ctx.arc(zx, yB + 8, 2.6, 0, Math.PI * 2);
+      ctx.fillStyle = ctx.strokeStyle; ctx.fill();
+      if (live) {
+        // the zone rails + the dwell arc filling as you hold it
+        ctx.setLineDash([10, 8]);
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(zx - O.zoneW / 2, SAFE_T + 92); ctx.lineTo(zx - O.zoneW / 2, yB - 24);
+        ctx.moveTo(zx + O.zoneW / 2, SAFE_T + 92); ctx.lineTo(zx + O.zoneW / 2, yB - 24);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (O.dwellT > 0) {
+          ctx.lineWidth = 3.4;
+          ctx.beginPath();
+          ctx.arc(zx, yB, 22, -Math.PI / 2, -Math.PI / 2 + (O.dwellT / O.dwell) * Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+  }
+  if (O.type === 'lanes' && O.laneX != null) {
+    const x0 = O.laneX - O.laneW / 2, x1 = O.laneX + O.laneW / 2;
+    const yTop = SAFE_T + 92;
+    const yBot = G.mode === 'junkie' ? shipY() + 44 : PADDLE_Y() + 20;
+    ctx.save();
+    ctx.setLineDash([12, 9]);
+    ctx.lineWidth = 2.2;
+    ctx.strokeStyle = 'rgba(255,213,79,0.55)';
+    ctx.beginPath();
+    ctx.moveTo(x0, yTop); ctx.lineTo(x0, yBot);
+    ctx.moveTo(x1, yTop); ctx.lineTo(x1, yBot);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const mk = G.bricks.find(b => !b.dead && b.laneMark);
+    if (mk) {
+      const mx = mk.bx + G.fx, my = mk.by + G.fy - mk.h / 2 - 14 - Math.sin(G.time * 5) * 3;
+      ctx.fillStyle = '#ffd54f';
+      ctx.beginPath();
+      ctx.moveTo(mx, my); ctx.lineTo(mx + 7, my - 9); ctx.lineTo(mx, my - 18); ctx.lineTo(mx - 7, my - 9);
+      ctx.closePath(); ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(255,213,79,0.8)';
+      ctx.beginPath(); ctx.arc(mx, mk.by + G.fy, Math.max(mk.w, mk.h) * 0.62 + 4, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+// AFT-020 THE SERAPH RAID: crown segments assemble on visible arcs over the
+// Sovereign; each live segment shows BOTH clocks (outer sweep = assembly
+// danger, inner bright fill = break progress) and a dashed TETHER to the
+// captain powering it — shape and motion, never color alone. The bound
+// mythic reads through crossed chain strokes until freed.
+function drawRaidFx() {
+  const F = G.finale;
+  if (!F || F.format !== 'raid' || !F.raid || F.mastery.clear) return;
+  if (G.state !== 'play' && G.state !== 'serve') return;
+  const RD = F.raid;
+  const seraph = G.bricks.find(b => b.raidSeraph && !b.dead);
+  if (seraph && !RD.window) {
+    const cx = seraph.bx + G.fx, cy = seraph.by + G.fy;
+    const rad = Math.max(seraph.w, seraph.h) * 0.85;
+    for (let i = 0; i < RD.segments.length; i++) {
+      const S = RD.segments[i];
+      const a0 = Math.PI + (i * Math.PI) / 3 + 0.12;
+      const a1 = Math.PI + ((i + 1) * Math.PI) / 3 - 0.12;
+      ctx.save();
+      if (S.state === 'broken' || S.state === 'torn' || S.state === 'fizzled') {
+        // a resolved slot is a visible GAP in the crown — a few shard ticks
+        ctx.strokeStyle = 'rgba(176,190,197,0.35)';
+        ctx.lineWidth = 2;
+        for (let k = 0; k < 3; k++) {
+          const ak = a0 + ((a1 - a0) * (k + 0.5)) / 3;
+          ctx.beginPath();
+          ctx.moveTo(cx + Math.cos(ak) * (rad - 5), cy + Math.sin(ak) * (rad - 5));
+          ctx.lineTo(cx + Math.cos(ak) * (rad + 5), cy + Math.sin(ak) * (rad + 5));
+          ctx.stroke();
+        }
+      } else {
+        const live = S.state === 'assembling';
+        ctx.lineWidth = live ? 6 : 3;
+        ctx.strokeStyle = live ? 'rgba(255,138,128,0.8)' : 'rgba(120,144,156,0.5)';
+        ctx.beginPath(); ctx.arc(cx, cy, rad, a0, a1); ctx.stroke();
+        if (live) {
+          // assembly clock sweeps the slot; break progress brightens inside it
+          const asm = Math.min(1, S.t / RD.assembleDur);
+          ctx.lineWidth = 8;
+          ctx.strokeStyle = 'rgba(255,82,82,0.9)';
+          ctx.beginPath(); ctx.arc(cx, cy, rad, a0, a0 + (a1 - a0) * asm); ctx.stroke();
+          const brk = Math.min(1, S.broken / RD.segNeed);
+          if (brk > 0) {
+            ctx.lineWidth = 3.4;
+            ctx.strokeStyle = '#80d8ff';
+            ctx.beginPath(); ctx.arc(cx, cy, rad - 9, a0, a0 + (a1 - a0) * brk); ctx.stroke();
+          }
+          // the tether names the captain that powers this segment
+          const owner = G.bricks.find(b => b.raidCaptain && !b.dead && b.subIdx === S.owner);
+          if (owner) {
+            const mid = (a0 + a1) / 2;
+            ctx.setLineDash([7, 7]);
+            ctx.lineDashOffset = -(G.time * 40) % 14; // energy flows captain → crown
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = 'rgba(255,138,128,0.55)';
+            ctx.beginPath();
+            ctx.moveTo(owner.bx + G.fx, owner.by + G.fy - owner.h / 2);
+            ctx.lineTo(cx + Math.cos(mid) * rad, cy + Math.sin(mid) * rad);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+        }
+      }
+      ctx.restore();
+    }
+  }
+  // the bound mythic: crossed chain strokes until freed
+  const bnd = G.bricks.find(b => b.raidBound && !b.dead && !b.raidFreed);
+  if (bnd) {
+    const bx2 = bnd.bx + G.fx, by2 = bnd.by + G.fy;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(185,246,202,0.65)';
+    ctx.lineWidth = 2.4;
+    for (const s2 of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(bx2 - bnd.w * 0.62, by2 - s2 * bnd.h * 0.5);
+      ctx.quadraticCurveTo(bx2, by2 + s2 * bnd.h * 0.18, bx2 + bnd.w * 0.62, by2 - s2 * bnd.h * 0.5);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+// procedural props (no sprite ids): the binding vines and the fallen cover
+function drawRaidVine(br, x, y) {
+  ctx.save();
+  ctx.translate(x, y);
+  const hurt = br.hp < br.maxHp;
+  ctx.strokeStyle = hurt ? 'rgba(174,213,129,0.75)' : 'rgba(124,179,66,0.95)';
+  ctx.lineWidth = 4;
+  for (let i = -1; i <= 1; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * 7, br.h / 2);
+    ctx.quadraticCurveTo(i * 12 + Math.sin(G.time * 2 + i) * 3, 0, i * 5, -br.h / 2);
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#33691e';
+  for (let i = 0; i < 3; i++) {
+    ctx.beginPath();
+    ctx.arc(Math.sin(i * 2.7) * 8, -br.h / 2 + 8 + i * (br.h - 16) / 2, 2.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (br.flash > 0) { ctx.globalAlpha = br.flash * 0.7; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(-br.w / 2, -br.h / 2, br.w, br.h); }
+  ctx.restore();
+}
+function drawRaidCover(br, x, y) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = 'rgba(96,125,139,0.9)';
+  ctx.strokeStyle = '#cfd8dc';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-br.w / 2, 4); ctx.lineTo(-br.w * 0.3, -br.h / 2); ctx.lineTo(br.w * 0.34, -br.h * 0.4);
+  ctx.lineTo(br.w / 2, 6); ctx.lineTo(br.w * 0.1, br.h / 2); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
 function drawTelegraphs() {
   for (const tg of G.telegraphs) {
     if (tg.br.dead) continue;
@@ -3565,6 +4212,39 @@ function drawPowerups() {
       ctx.beginPath(); ctx.moveTo(0, -24); ctx.lineTo(1, 8); ctx.lineTo(16, -4); ctx.moveTo(1, 8); ctx.lineTo(-13, 12); ctx.stroke();
       ctx.globalAlpha = 1;
       drawGlyph(ctx, 'fairy', 1, 3, 5.5, '#ffffff');
+    } else if (pu.p.key === 'wish') {
+      // AFT-020 siege coda: a falling wish-star with a soft tail
+      const tw = 0.8 + 0.2 * Math.sin(G.time * 5 + pu.x * 0.03);
+      ctx.strokeStyle = 'rgba(255,213,79,0.5)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(0, -26); ctx.lineTo(0, -10); ctx.stroke();
+      ctx.fillStyle = '#fff9c4';
+      ctx.beginPath();
+      for (let k = 0; k < 4; k++) {
+        const a = (k * Math.PI) / 2 + pu.rot * 0.5;
+        ctx.lineTo(Math.cos(a) * 11 * tw, Math.sin(a) * 11 * tw);
+        ctx.lineTo(Math.cos(a + Math.PI / 4) * 4.5, Math.sin(a + Math.PI / 4) * 4.5);
+      }
+      ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.arc(0, 0, 4 * tw, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffd54f'; ctx.fill();
+      ctx.lineWidth = 1.4; ctx.strokeStyle = '#fff';
+      ctx.beginPath(); ctx.arc(0, 0, 13, 0, Math.PI * 2); ctx.stroke();
+    } else if (pu.p.key === 'bloom') {
+      // AFT-020 relay coda: a soft five-petal bloom of rewound time —
+      // strokes + fills only, gentle pulse, reads on bright and dark skies
+      const pulse = 0.82 + 0.18 * Math.sin(G.time * 4 + pu.x * 0.05);
+      for (let i = 0; i < 5; i++) {
+        const a = (i * Math.PI * 2) / 5 + pu.rot * 0.4;
+        ctx.beginPath();
+        ctx.ellipse(Math.cos(a) * 8, Math.sin(a) * 8, 7, 4, a, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(185,246,202,0.85)';
+        ctx.fill();
+      }
+      ctx.beginPath(); ctx.arc(0, 0, 5 * pulse, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffd54f'; ctx.fill();
+      ctx.lineWidth = 1.4; ctx.strokeStyle = '#e8f5e9';
+      ctx.beginPath(); ctx.arc(0, 0, 11, 0, Math.PI * 2); ctx.stroke();
     } else if (pu.p.key === 'element') {
       // element orb: small glassy sphere holding a type symbol
       const col = TYPE_COLORS[pu.p.t];
@@ -4619,16 +5299,17 @@ function drawHUD() {
   const span0 = narrow ? 12 : 150, span1 = narrow ? W - 12 : hbLeft - 10;
   const waveY = narrow ? 48 : (G.modifier ? 22 : 28);
   const waveText = G.secret.vmax ? 'SECRET RIFT · ' + SKIN.secret.name
-    : (G.trial ? 'TRIAL · ' : '') + gen.name + ' ' + (stg + 1) + '/3 · ' + SKIN.stageNames[stg];
+    : (G.trial ? 'TRIAL · ' : '') + gen.name + ' ' + (stg + 1) + '/3 · ' + (stageTitle(G.level) || SKIN.stageNames[stg]);
   fitLabel(waveText, (span0 + span1) / 2, waveY,
     { size: Math.min(16, W / 30), min: 9.5, weight: 900, color: '#e3f2fd', maxW: span1 - span0, zone: 'topHud' });
   // AFT-001: the modifier chip is SECONDARY copy — it yields its row to a
   // live objective banner (the win condition) instead of stacking under it
   const objLive = G.objective && !G.objective.done && !G.objective.failed;
   if (G.modifier && !narrow && !objLive) {
-    const mb = fitLabel(G.modifier.name, (span0 + span1) / 2 + 4, 42,
-      { size: 10, min: 8.5, weight: 700, color: G.modifier.color, maxW: span1 - span0 - 28, zone: 'topHud' });
-    drawGlyph(ctx, G.modifier.icon, mb.x0 - 8, 42, 6, G.modifier.color);
+    const mInfo = conditionInfo(G.modifier, regionIdx(G.level));
+    const mb = fitLabel(mInfo.name, (span0 + span1) / 2 + 4, 42,
+      { size: 10, min: 8.5, weight: 700, color: mInfo.color, maxW: span1 - span0 - 28, zone: 'topHud' });
+    drawGlyph(ctx, mInfo.icon, mb.x0 - 8, 42, 6, mInfo.color);
   }
   drawPlayerHealthBar();
   drawBossLane(); // AFT-002: the docked boss name/health lane
@@ -4717,6 +5398,9 @@ function drawHUD() {
 }
 function drawBrickBehaviorLegend() {
   if (G.mode !== 'classic' || stageIdx(G.level) === 2 || (G.state !== 'play' && G.state !== 'serve')) return;
+  // AFT-001: the region rule is SECONDARY copy — it yields its band to a
+  // live objective banner (the win condition outranks the flavor rule)
+  if (G.objective && !G.objective.done && !G.objective.failed) return;
   const key = BRICK_BEHAVIOR_ORDER[Math.min(BRICK_BEHAVIOR_ORDER.length - 1, regionIdx(G.level))];
   const info = BRICK_BEHAVIORS[key];
   if (!info) return;
@@ -4739,8 +5423,50 @@ function drawBrickBehaviorLegend() {
 // OBJECTIVE BANNER (Milestone 3 Round B) — a compact top strip naming the
 // live in-wave objective with a progress readout, so a survive/escort goal
 // is understandable from a UI cue, not just from the announce card.
+// AFT-020: the finale's shared meter rides the SAME banner surface as the
+// wave objectives — one pill, one containment authority, no new lane.
+function drawFinaleMeterBanner() {
+  const F = G.finale;
+  if (!F || !F.meter || F.mastery.clear || (G.state !== 'play' && G.state !== 'serve')) return;
+  const M = F.meter;
+  const short = W < 560;
+  let label = M.label || 'FINALE';
+  let progress = Math.max(0, Math.min(1, (M.value || 0) / (M.max || 1)));
+  let readout = '';
+  if (F.format === 'relay' && F.relay && F.beat === 0) {
+    readout = 'PASS ' + Math.min(F.relay.need, F.relay.passes + 1) + '/' + F.relay.need;
+  } else if (F.format === 'raid' && F.raid) {
+    if (F.raid.window) return; // the failing-weapon beat reads from the HUD dock
+    readout = ((F.profile && F.profile.raid && F.profile.raid.segmentWord) || 'SEGMENT')
+      + ' ' + Math.min(F.raid.segments.length, F.raid.seg + 1) + '/' + F.raid.segments.length;
+  } else if (F.beat === 2 && F.coda) {
+    readout = (F.mastery.counters.blooms || 0) + '/' + M.max;
+  } else if (F.beat === 1) return; // the boss beat reads from the HUD dock, not a meter
+  const y = SAFE_T + (short ? 44 : 52);
+  const w = Math.min(W * 0.72, (short ? 220 : 300));
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  roundRect(W / 2 - w / 2, y, w, short ? 26 : 30, (short ? 26 : 30) / 2);
+  ctx.fillStyle = 'rgba(5,8,22,0.9)'; ctx.fill();
+  ctx.lineWidth = 1.4; ctx.strokeStyle = '#80d8ff'; ctx.stroke();
+  if (progress > 0) {
+    ctx.save();
+    roundRect(W / 2 - w / 2, y, w, short ? 26 : 30, (short ? 26 : 30) / 2); ctx.clip();
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = '#80d8ff';
+    ctx.fillRect(W / 2 - w / 2, y, w * progress, short ? 26 : 30);
+    ctx.restore();
+  }
+  ctx.font = `900 ${short ? 9.5 : 11}px Orbitron, sans-serif`;
+  let line = '◈ ' + label + (readout ? '  ·  ' + readout : '');
+  if (readout && ctx.measureText(line).width > w - 20) line = '◈ ' + label;
+  fitLabel(line, W / 2, y + (short ? 13.5 : 15.5),
+    { size: short ? 9.5 : 11, min: 8.5, weight: 900, color: '#b3e5fc', maxW: w - 20, zone: 'banner' });
+  ctx.restore();
+}
 function drawObjectiveBanner() {
   const O = G.objective;
+  if (!O && G.finale && G.finale.meter) { drawFinaleMeterBanner(); return; }
   // a FAILED objective draws nothing — the banner vanishing is the tell (the
   // strip notice already named the fall), and the wave is a normal clear now.
   if (!O || O.done || O.failed || (G.state !== 'play' && G.state !== 'serve')) return;
@@ -4750,6 +5476,10 @@ function drawObjectiveBanner() {
   if (O.type === 'survive') readout = Math.max(0, Math.ceil(O.dur - O.t)) + 's';
   else if (O.type === 'defend') readout = Math.max(0, Math.ceil(O.dur - O.t)) + 's';
   else if (O.type === 'escort') readout = Math.round((O.progress || 0) * 100) + '%';
+  else if (O.type === 'wardbreak') readout = ((O.total || 0) - (O.left || 0)) + '/' + (O.total || 0);
+  else if (O.type === 'lanes') readout = (O.hits || 0) + '/' + O.count;
+  else if (O.type === 'bells') readout = (O.rung || 0) + '/' + O.count;
+  else if (O.type === 'undercard') readout = Math.round((O.crowd || 0) * 100) + '%';
   // PROTECT objectives inline the friendly's remaining heart pips
   const fr = O.friendly;
   if (fr && !fr.dead) label += '  ·  ' + '♥'.repeat(Math.max(0, fr.fhp));
@@ -6692,14 +7422,21 @@ function drawTrial() {
     ctx.lineWidth = sel ? 2 : 1;
     ctx.strokeStyle = sel ? '#ffd54f' : 'rgba(255,255,255,0.22)';
     ctx.stroke();
-    fitLabel((i + 1) + '/3 ' + SKIN.stageNames[i], r.x + r.w / 2, r.y + r.h / 2 + 1,
+    fitLabel((i + 1) + '/3 ' + (stageTitle(trialSel.region * STAGES + i + 1) || SKIN.stageNames[i]),
+      r.x + r.w / 2, r.y + r.h / 2 + 1,
       { size: Math.min(11, r.w / 10), min: 7.5, weight: 900, color: sel ? '#ffd54f' : '#cfd8dc', maxW: r.w - 8 });
   }
   // the secret replacement fight directly so it can be practiced on demand.
   if (T.rounds) {
     const gsel = SKIN.gens[trialSel.region];
-    const labels = ['FULL GAUNTLET', '★ ' + gsel.boss.n.toUpperCase(),
-      gsel.gauntlet ? '✦ ' + (SKIN.names[gsel.gauntlet.myth[0]] || 'MYTHICAL').toUpperCase() : '✦ MYTHICAL',
+    // AFT-020: the round chips carry the finale's NAMED CHAPTERS from the
+    // skin's profile (title / core / coda labels), falling back to the old
+    // generic wording where no profile exists
+    const fpT = finaleProfile(trialSel.region);
+    const chapT = i => (fpT && fpT.beats && fpT.beats[i] && fpT.beats[i].label) || null;
+    const labels = [(fpT && fpT.title) || 'FULL GAUNTLET',
+      '★ ' + (chapT(1) || gsel.boss.n.toUpperCase()),
+      '✦ ' + (chapT(2) || (gsel.gauntlet ? (SKIN.names[gsel.gauntlet.myth[0]] || 'MYTHICAL').toUpperCase() : 'MYTHICAL')),
       '◆ ' + SKIN.secret.name + ' · SECRET'];
     for (let i = 0; i < T.roundCount; i++) {
       const rr2 = T.round(i), sel2 = trialSel.round === i;
@@ -7155,7 +7892,8 @@ function drawFullUpgradeTree() {
   const buildLine = T.compact
     ? 'BUILD ' + ownedN + '/50 · ' + activeN + ' PATHS · ONLY OPTION TAGS INSTALL'
     : 'BUILD ' + ownedN + '/50 · ' + activeN + ' ACTIVE ' + (activeN === 1 ? 'PATH' : 'PATHS') +
-      ' · ONLY THE THREE WHITE OPTION TAGS CAN BE INSTALLED THIS STAGE';
+      ' · ONLY THE ' + (['ONE', 'TWO', 'THREE', 'FOUR', 'FIVE'][(G.upgradeChoices || []).length - 1] || 'WHITE') +
+      ' WHITE OPTION TAGS CAN BE INSTALLED THIS STAGE';
   ctx.fillText(buildLine, p.x + p.w / 2, p.y + (T.compact ? 37 : 45), p.w - 96);
 
   if (!treeSel.kind) treeSel.kind = 'tier';
@@ -8262,7 +9000,10 @@ function drawResults() {
   title('STAGE CLEAR!', topY, short ? 30 : Math.min(46, W / 14), accent);
   ctx.font = '700 ' + (short ? 12 : 15) + 'px Orbitron, sans-serif';
   ctx.fillStyle = '#cfd8dc';
-  ctx.fillText(R.region + ' · ' + R.stage + '  —  STAGE ' + (stageIdx(R.lvl) + 1) + '/3', W / 2, topY + (short ? 26 : 40));
+  // both names: the authored stage title leads, the structural label orients
+  fitLabel((R.stageTitle ? R.stageTitle + '  ·  ' : '') + R.region + ' · ' + R.stage
+    + '  —  STAGE ' + (stageIdx(R.lvl) + 1) + '/3', W / 2, topY + (short ? 26 : 40),
+  { size: short ? 12 : 15, min: 9, weight: 700, color: '#cfd8dc', maxW: W * 0.92, zone: 'results' });
   // combat readout: two compact rows straight from the balance ledger
   const rowY = topY + (short ? 48 : 74);
   const rowGap = short ? 20 : 26;
@@ -8286,9 +9027,24 @@ function drawResults() {
     ctx.fillText('OBJECTIVE: ' + R.objective.toUpperCase() + ' — ' + (R.objectiveDone ? 'COMPLETE' : 'FAILED'),
       W / 2, rowY + rowGap * 2, W * 0.92);
   }
+  // AFT-020: a finale clear names the MASTERY the encounter taught —
+  // countered (the signature answered) or mastered (every major beat)
+  if (R.finaleMastery) {
+    ctx.fillStyle = R.finaleMastery === 'mastered' ? '#ffd54f'
+      : R.finaleMastery === 'countered' ? '#80d8ff' : '#b0bec5';
+    ctx.font = bodyFont(short ? 11 : 13, 700);
+    fitLabel((R.finaleTitle ? R.finaleTitle + ' — ' : '')
+      + (R.finaleMastery === 'mastered' ? '★ MASTERED — YOUR REROLL WILL PIN ITS BEST OFFER'
+        : R.finaleMastery === 'countered' ? 'SIGNATURE COUNTERED — A FIFTH OFFER AWAITS'
+          : 'CLEARED — COUNTER THE SIGNATURE FOR A WIDER DRAFT'),
+    W / 2, rowY + rowGap * (R.objective ? 3 : 2),
+    { size: short ? 11 : 13, min: 9, weight: 700,
+      color: R.finaleMastery === 'mastered' ? '#ffd54f' : R.finaleMastery === 'countered' ? '#80d8ff' : '#b0bec5',
+      maxW: W * 0.92, zone: 'results' });
+  }
   // objectives — the mastery list with medal states (pushed down one row when
   // the encounter-objective line above is present, so they never collide)
-  const objY = rowY + rowGap * (short ? 2.2 : 2.7) + (R.objective ? rowGap : 0);
+  const objY = rowY + rowGap * (short ? 2.2 : 2.7) + (R.objective ? rowGap : 0) + (R.finaleMastery ? rowGap : 0);
   // narrow phones stack name+badge over the description, so the row is taller
   const objH = narrow ? (short ? 42 : 54) : (short ? 30 : 40);
   const panelW = Math.min(W * 0.92, 640);
@@ -8919,6 +9675,16 @@ function render() {
     drawDangerLine();
     drawRallyZone();
     drawTelegraphs();
+    drawRelayFx(); // AFT-020: the gale-relay corridor + carrier cues (under the sprites)
+    drawRaidFx();  // AFT-020: the raid's crown arcs, tethers + binding read
+    drawObjectiveFx(); // AFT-020: ward triangle + bells + live-lane rails/marks
+    drawSiegeFx();     // AFT-020: seal tethers + the current trail
+    drawWardFx();      // AFT-020: the Triune Ward between the Heralds
+    drawHourglassFx(); // AFT-020: ring windows + replay pre-echoes
+    drawCircuitFx();   // AFT-020: the illuminated route + the flame's wake
+    drawHuntFx();      // AFT-020: the closing shadow sector
+    drawRiteFx();      // AFT-020: totem rites + the moon + the thief's charge
+    drawChaseFx();     // AFT-020: the charge band + the pair's chains
     drawBricks();
     drawFragments();
     drawShield();

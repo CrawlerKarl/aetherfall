@@ -453,6 +453,17 @@
 
   // ---- objective families: species remapped into this id space
   const encounterObjectives = {
+    // AFT-020 non-attrition identities: break the three linked ward sources
+    // and the whole flock scatters (Greenspell), or ride the moving live
+    // lane — the marked target is only vulnerable from inside it (Chrome).
+    '0:1': { type: 'wardbreak', count: 3, name: 'CLEANSE THE WARD',
+      tip: 'BREAK THE THREE WARD SOURCES — THE FLOCK SCATTERS' },
+    '1:0': { type: 'bells', count: 3, dwell: 1.2, name: 'RING THE SKY BELLS',
+      tip: 'CROSS THE THREE BELL ZONES IN ORDER — HOLD EACH UNTIL IT RINGS' },
+    '4:1': { type: 'lanes', count: 4, name: 'RUN THE LIVE LANES',
+      tip: 'THE MARKED TARGET ONLY YIELDS FROM INSIDE THE LIVE LANE' },
+    '7:1': { type: 'undercard', name: 'WIN THE UNDERCARD',
+      tip: 'FILL THE CROWD METER — KILLS AND COMBOS ARE THE SHOW' },
     '2:1': { type: 'survive', dur: 22, name: 'SURVIVE THE MIGRATION',
       tip: "OUTLAST THE SWARM — YOU DON'T HAVE TO KILL THEM ALL" },
     '3:0': { type: 'escort', name: 'ESCORT THE COURIER', species: 401, speciesT: 'steel', path: 'cross',
@@ -619,8 +630,262 @@
     }),
   });
 
+  // ---------- AFT-020 finale profiles ----------
+  // The nine realm finales carry their AUTHORED titles from day one (they
+  // are this world's chapter names); formats stay 'ladder' until each
+  // realm's redesigned encounter ships, then the entry flips to its true
+  // format (relay / siege / hourglass / circuit / hunt / rite / raid /
+  // chase) with its authored beats. Work values are today's real HP
+  // shares in Sovereign-equivalents.
+  const FINALE_TITLES = [
+    'THE FIRST COVENANT', 'THE GALE RELAY', 'SIEGE OF THE DEEP CURRENT',
+    'THE FRACTURED HOUR', 'TRIAL OF THE LIVE GRID', 'THE FALSE FOUNDATION',
+    'THE ECLIPSE RITE', 'THE SERAPH RAID', 'THE FIRST FUSION',
+  ];
+  const OPENING_NAMES = [
+    'THE TRIUNE WARD', 'THE THREE VOWS', 'THE PRESSURE SEAL',
+    'THE FORGE SIBYLS', 'THE PALADIN GATE', 'THE FOUNDATION SERPENT',
+    'THE THREE TOTEMS', 'THE ARENA CAPTAINS', 'THE SEALED VESSELS',
+  ];
+  const finaleProfiles = REALM_BOSSES.map((B, r) => ({
+    format: 'ladder',
+    title: FINALE_TITLES[r],
+    beats: [
+      { key: 'opening', label: OPENING_NAMES[r],
+        work: B.sents.length === 1 ? 0.85 : 1.26 },
+      { key: 'core', label: B.leg[0].toUpperCase(), work: 1.0 },
+      { key: 'coda', label: B.myth[0].toUpperCase(), work: 0.82 },
+    ],
+  }));
+  // Realm 2 — THE GALE RELAY (AFT-020 Phase 2): one continuous pursuit. The
+  // three Vows pass ONE storm core; only the carrier takes real damage and
+  // the wind defines the true-aim corridor. Zephyrion descends into the
+  // still-running encounter; Verdandi's coda REWINDS the storm into
+  // Hourseed blooms — a reward event, not another health bar.
+  finaleProfiles[1] = {
+    format: 'relay',
+    title: FINALE_TITLES[1],
+    beats: [
+      { key: 'relay', label: 'THE THREE VOWS', work: 0.42,
+        tip: 'ONLY THE CORE CARRIER TAKES REAL DAMAGE · FIRE FROM INSIDE THE WIND CORRIDOR' },
+      { key: 'descent', label: REALM_BOSSES[1].leg[0].toUpperCase(), work: 1.0,
+        tip: 'THE WARDEN ABSORBS THE CORE — THE GALE IS HIS NOW' },
+      { key: 'coda', label: 'THE HOURSEED REWIND', work: 0,
+        tip: 'THE STORM REWINDS INTO BLOOMS — GATHER THEM' },
+    ],
+    relay: {
+      coreName: 'STORM CORE', meterLabel: 'STORM CORE',
+      bloomName: 'HOURSEED BLOOM', deflectWord: 'THE WIND TURNS IT',
+    },
+  };
+  // Realm 3 — SIEGE OF THE DEEP CURRENT (AFT-020 Phase 4): an environmental
+  // siege. Thalassar circles from the opening but the three Colossi hold
+  // the PRESSURE SEAL — the destruction ORDER is the player's, and every
+  // broken Colossus removes its own hazard while strengthening one property
+  // of the final weather. Thalassar's body leaves a CURRENT TRAIL whose
+  // safety alternates. Mirajin's coda drops three falling WISHES — Commit,
+  // Adapt, Explore — and the one you catch shapes the Victory Draft.
+  finaleProfiles[2] = {
+    format: 'siege',
+    title: FINALE_TITLES[2],
+    beats: [
+      { key: 'stations', label: 'THE PRESSURE SEAL', work: 0.45,
+        tip: 'CHOOSE THE ORDER — EVERY BROKEN COLOSSUS CHANGES THE FINAL WEATHER' },
+      { key: 'weather', label: REALM_BOSSES[2].leg[0].toUpperCase(), work: 1.0,
+        tip: "THE CURRENT TRAIL TURNS — WATCH WHICH WATER IS SAFE" },
+      { key: 'coda', label: 'THREE WISHES', work: 0,
+        tip: 'CATCH ONE FALLING WISH — IT SHAPES YOUR VICTORY DRAFT' },
+    ],
+    siege: {
+      sealWord: 'THE SEAL HOLDS', trailWord: 'THE CURRENT BURNS',
+      wishNames: ['COMMIT', 'ADAPT', 'EXPLORE'],
+      weatherWords: ['THE TIDE QUICKENS', 'THE FROST WIDENS THE WAKE', 'THE HULL ARMS THE DEEP'],
+    },
+  };
+  // Realm 4 — THE FRACTURED HOUR (AFT-020 Phase 5): every major event
+  // happens twice. The hostile Sibyls are AWAKENED through their own
+  // openings into friendly forge clocks that must survive; the Clockwork
+  // Regent is damageable only while an awakened clock RINGS, and its
+  // volleys REPLAY as pale ghosts seconds later. At the midpoint Nocthern
+  // STEALS one timeline — Forge Hour and Still Hour alternate, and the two
+  // actors share one work budget instead of queueing as rounds.
+  finaleProfiles[3] = {
+    format: 'hourglass',
+    title: FINALE_TITLES[3],
+    beats: [
+      { key: 'awaken', label: 'WAKE THE SIBYLS', work: 0.35,
+        tip: 'STRIKE A SIBYL IN ITS OPENING — THRICE, AND IT WAKES TO YOUR SIDE' },
+      { key: 'regent', label: REALM_BOSSES[3].leg[0].toUpperCase(), work: 0.85,
+        tip: 'IT ONLY YIELDS WHILE A WOKEN CLOCK RINGS — AND EVERY BLOW ECHOES TWICE' },
+      { key: 'stolenHour', label: 'THE STILL HOUR', work: 0.45,
+        tip: 'NOCTHERN STEALS A TIMELINE — STRIKE WHOEVER HOLDS THE PRESENT HOUR' },
+    ],
+    hourglass: {
+      wakeWord: 'A SIBYL WAKES', silentWord: 'THE HOURS ARE SILENT',
+      outWord: 'OUT OF HOUR', replayWord: 'THE HOUR REPEATS',
+      forgeWord: 'FORGE HOUR', stillWord: 'STILL HOUR',
+    },
+  };
+  // Realm 5 — TRIAL OF THE LIVE GRID (AFT-020 Phase 5): power follows a
+  // circuit that can be REDIRECTED. The player CHOOSES a Paladin duel (the
+  // first one struck); the other two stand down into neutral grid
+  // terminals. Voltrex's circuits illuminate their COMPLETE route before
+  // any electricity moves; striking the charged terminal mid-illumination
+  // redirects the jolt into Voltrex and relights a district. Ignivar
+  // arrives in the coda as a moving VICTORY FLAME — ridden, never fought.
+  finaleProfiles[4] = {
+    format: 'circuit',
+    title: FINALE_TITLES[4],
+    beats: [
+      { key: 'duel', label: 'THE PALADIN GATE', work: 0.30,
+        tip: 'THE FIRST PALADIN YOU STRIKE IS YOUR DUEL — THE OTHERS STAND DOWN' },
+      { key: 'grid', label: REALM_BOSSES[4].leg[0].toUpperCase(), work: 1.0,
+        tip: 'THE ROUTE LIGHTS BEFORE THE JOLT — BREAK THE CHARGED TERMINAL TO TURN IT HOME' },
+      { key: 'victoryFlame', label: 'THE VICTORY FLAME', work: 0,
+        tip: 'RIDE ITS WAKE FOR GLORY — OR STAND CLEAR AND KEEP IT' },
+    ],
+    circuit: {
+      duelWord: 'THE DUEL IS CHOSEN', standWord: 'THE OTHERS STAND DOWN',
+      redirectWord: 'REDIRECTED — THE GRID BITES BACK', relitWord: 'A DISTRICT RELIGHTS',
+      flameWord: 'RIDE THE WAKE',
+    },
+  };
+  // Realm 6 — THE FALSE FOUNDATION (AFT-020 Phase 5): hunt and rescue. The
+  // Foundation Serpent sheds glass cells into mirrored routes — break the
+  // REAL ones among the reflections and it flees unbeaten. Nyxharrow casts
+  // closing wing-shaped shadow sectors that drain Surge and feed it; deep
+  // in the fight Lucerna is VISIBLE, imprisoned in a glass facet — shatter
+  // the prison and her prism opens the final window. One hunt, one boss,
+  // one rescue — never a solo-trio ladder.
+  finaleProfiles[5] = {
+    format: 'hunt',
+    title: FINALE_TITLES[5],
+    beats: [
+      { key: 'shedding', label: 'THE GLASS SHEDDING', work: 0.30,
+        tip: 'BREAK THE REAL CELLS — REFLECTIONS SHATTER LIKE LIES' },
+      { key: 'shadow', label: REALM_BOSSES[5].leg[0].toUpperCase(), work: 1.0,
+        tip: 'LEAVE A CLOSING SHADOW SECTOR — IT DRINKS WHAT IT CATCHES' },
+      { key: 'rescue', label: 'FREE LUCERNA', work: 0.35,
+        tip: 'SHATTER THE PRISON — HER PRISM OPENS THE FINAL WINDOW' },
+    ],
+    hunt: {
+      realWord: 'A TRUE CELL BREAKS', falseWord: 'ONLY A REFLECTION',
+      fleeWord: 'THE SERPENT FLEES THE LIGHT', sectorWord: 'THE SHADOW DRINKS',
+      freeWord: 'LUCERNA IS FREE — HER PRISM BURNS THE SHADOW',
+    },
+  };
+  // Realm 7 — THE ECLIPSE RITE (AFT-020 Phase 6): ritual tests flowing into
+  // a Sovereign fight with a SABOTEUR. Each Totem conducts a brief non-HP
+  // rite (a rotating opening, a pulse to match, a root to break); every
+  // completed mark keeps one safe star lit in the climax. The Pale Eclipse
+  // alternates bright and dark crescent gates (shape, not color alone),
+  // and during the full eclipse Umbrix STEALS banked Surge — tag it three
+  // times to take everything back into the Sovereign's face.
+  finaleProfiles[6] = {
+    format: 'rite',
+    title: FINALE_TITLES[6],
+    beats: [
+      { key: 'rites', label: 'THE THREE TOTEMS', work: 0.30,
+        tip: 'EACH TOTEM ASKS A RITE — AN OPENING, A PULSE, A ROOT' },
+      { key: 'eclipse', label: REALM_BOSSES[6].leg[0].toUpperCase(), work: 1.0,
+        tip: 'THE MOON DECIDES WHICH GATES ARE REAL — READ THE SHAPE' },
+      { key: 'reclaim', label: 'THE STOLEN SHADOW', work: 0.35,
+        tip: 'UMBRIX HOLDS YOUR POWER — TAG IT THRICE TO TAKE IT BACK' },
+    ],
+    rite: {
+      markWord: 'A TOTEM MARK IS YOURS', failWord: 'THE RITE RESISTS',
+      brightWord: 'THE BRIGHT CRESCENT RULES', darkWord: 'THE DARK CRESCENT RULES',
+      stealWord: 'UMBRIX DRINKS YOUR SURGE', tagWord: 'TAGGED', reclaimWord: 'YOUR POWER RETURNS — IT STRIKES THE ECLIPSE',
+    },
+  };
+  // Realm 9 — THE FIRST FUSION (AFT-020 Phase 6): a branching route, a
+  // moving chase, and a LINKED two-boss climax that cracks straight into
+  // the Ninefold Dawn. Choose one Vessel as the route in (the others seal);
+  // Aurelion hunts in telegraphed charges — every charge that MISSES
+  // shatters a Cradle lock; Marionne puppets the sealed Vessels mid-chase,
+  // then CHAINS itself to Aurelion: bait his charge over the puppeteer to
+  // break the chains, and fell the exposed pair as one linked fight.
+  finaleProfiles[8] = {
+    format: 'chase',
+    title: FINALE_TITLES[8],
+    beats: [
+      { key: 'route', label: 'THE SEALED ROADS', work: 0.30,
+        tip: 'THE FIRST VESSEL YOU STRIKE OPENS YOUR ROAD — THE OTHERS SEAL' },
+      { key: 'pursuit', label: REALM_BOSSES[8].leg[0].toUpperCase(), work: 0.85,
+        tip: 'DODGE THE CHARGE — EVERY MISS SHATTERS A CRADLE LOCK' },
+      { key: 'fusion', label: 'THE CHAINED CROWN', work: 0.55,
+        tip: 'BAIT THE CHARGE OVER THE PUPPETEER — BREAK THE CHAINS, FELL THE PAIR' },
+    ],
+    chase: {
+      routeWord: 'YOUR ROAD OPENS', sealWord: 'THE OTHER ROADS SEAL',
+      lockWord: 'A CRADLE LOCK SHATTERS', chainWord: 'A CHAIN BREAKS',
+      exposedWord: 'THE PAIR IS EXPOSED — END IT', linkWord: 'THEY SHARE ONE FATE',
+    },
+  };
+  // Realm 8 — THE SERAPH RAID (AFT-020 Phase 2): a simultaneous stadium
+  // raid. Omega Seraph hangs overhead from the first second, assembling a
+  // crown-lance from arena segments; the three captains each power one.
+  // Damaging the segment's OWN captain fills the BREAK meter fastest; a
+  // broken segment leaves cover. Vyrakka begins bound in the arena vines —
+  // freeing her tears a segment open, and turns her loose. When the weapon
+  // fails, one coordinated window ends it. No sequential cleanup.
+  finaleProfiles[7] = {
+    format: 'raid',
+    title: FINALE_TITLES[7],
+    beats: [
+      { key: 'assembly', label: 'THE CROWN ASSEMBLES', work: 0.15,
+        tip: 'BREAK THE SEGMENT — HIT THE CAPTAIN POWERING IT' },
+      { key: 'crown', label: 'BREAK THE CROWN', work: 0.30,
+        tip: 'THE CAPTAINS TRADE THE WORK — FOLLOW THE TETHER' },
+      { key: 'window', label: 'THE FAILING WEAPON', work: 1.0,
+        tip: 'THE CROWN FAILS — STRIKE THE SERAPH NOW' },
+    ],
+    raid: {
+      meterLabel: 'BREAK METER', seraphShieldWord: 'THE CROWN SHIELDS IT',
+      segmentWord: 'CROWN SEGMENT', boundName: 'VYRAKKA IS BOUND',
+      freeWord: 'VYRAKKA UNBOUND — SHE TEARS THE CROWN!',
+      jobs: ['ENERGIZE', 'REINFORCE', 'FREEZE'],
+    },
+  };
+
+  // ---------- AFT-020 stage titles ----------
+  // Every one of the 27 stages carries its own name (the structural
+  // ARRIVAL / CHALLENGE / finale subtitle stays for orientation). Finale
+  // slots reuse the authored finale titles so Trial, results and the HUD
+  // all speak one name per encounter.
+  const stageTitles = [
+    ['HEDGEROW AWAKENING', 'WARDSTORM', FINALE_TITLES[0]],
+    ['THE CARILLON ROADS', 'CROSSWIND VIGIL', FINALE_TITLES[1]],
+    ['THE SALT MEADOWS', 'THE GREAT MIGRATION', FINALE_TITLES[2]],
+    ['EMBERLINE CROSSING', "THE COURIER'S RUN", FINALE_TITLES[3]],
+    ['NEON FRONTAGE', 'THE LIVE LANES', FINALE_TITLES[4]],
+    ['THE MIRROR GALLERIES', 'BEACON WATCH', FINALE_TITLES[5]],
+    ['THE LEY SHALLOWS', 'ECLIPSE TIDE', FINALE_TITLES[6]],
+    ['THE UNDERCARD', "CHALLENGER'S GAUNTLET", FINALE_TITLES[7]],
+    ['THE SUNDERED ROAD', 'ECHOES OF EIGHT REALMS', FINALE_TITLES[8]],
+  ];
+
+  // ---------- AFT-020 realm-authored conditions (Act I) ----------
+  // Same engine physics, this realm's WORDS — and a Challenge stage runs
+  // its realm's authored condition every time (identity, not dice).
+  const conditionAuthored = { 0: 'winds', 1: 'ambush', 2: 'swift', 3: 'swift', 4: 'bounty', 5: 'winds', 6: 'winds', 7: 'bounty', 8: 'ambush' };
+  const conditionNames = {
+    0: { winds: { name: 'WANDERING WARDS', desc: 'LOOSE WARDLIGHT BENDS EVERY FLIGHT PATH' } },
+    1: { ambush: { name: 'BELLTOWER CROSSWINDS', desc: 'THE GALE CARRIES THEIR FIRE IN EARLY AND OFTEN' } },
+    2: { swift: { name: 'RISING CURRENT', desc: 'THE DEEP PRESSES IN — EVERYTHING MOVES FASTER' } },
+    3: { swift: { name: 'CONVEYOR SHIFT', desc: 'THE FORGE LINES RUN HOT — EVERYTHING MOVES FASTER' } },
+    4: { bounty: { name: 'GRID SURGE', desc: 'THE LIVE GRID PAYS DOUBLE — AND FIRES FOR IT' } },
+    5: { winds: { name: 'PANE REFLECTIONS', desc: 'THE GALLERY GLASS BENDS EVERY FLIGHT PATH' } },
+    6: { winds: { name: 'LEY CROSSWINDS', desc: 'THE LEY LINES BEND EVERY FLIGHT PATH' } },
+    7: { bounty: { name: 'CROWD DECREE', desc: 'THE CROWD PAYS DOUBLE — AND DEMANDS A SHOW' } },
+    8: { ambush: { name: 'FUSION INSTABILITY', desc: 'THE SUNDERED AIR SPITS FIRE EARLY AND OFTEN' } },
+  };
+
   // ---------- assembly ----------
   Object.assign(AF, {
+    finaleProfiles,
+    stageTitles,
+    conditionAuthored, conditionNames,
     typeNames,
     edition: 'AETHERFALL EDITION',
     affinities: true, // unlocks the LIGHT/DARK setup pick (Round S6)

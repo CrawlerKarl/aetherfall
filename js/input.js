@@ -358,7 +358,7 @@ window.addEventListener('keydown', e => {
     if (upgradeTreeOpen) syncTreeSelectionToDraft();
     SFX.wall();
   }
-  if (G.state === 'upgrade' && G.upgradeChoices && G.stateT > 0.8 && /^Digit[123]$/.test(e.code)) {
+  if (G.state === 'upgrade' && G.upgradeChoices && G.stateT > 0.8 && /^Digit[12345]$/.test(e.code)) {
     // digits SELECT (inspect); Enter / the same digit again confirms
     const i = +e.code.slice(5) - 1;
     if (G.upgradeChoices[i]) {
@@ -518,20 +518,25 @@ function handleSavePress(x, y, A) {
 }
 // between-wave upgrade cards: 3 across on desktop, stacked rows on phones
 function upgradeLayout() {
+  // AFT-020: finale VICTORY DRAFTS deal 4 (or, countered, 5) offers — the
+  // layout reads the live hand size so both branches stay contained
+  const n = Math.max(3, (G.upgradeChoices || []).length || 3);
   const short = H < 520;
   const stacked = W < 560 && !short;
   if (stacked) {
-    const cw = Math.min(380, W * 0.92), ch = Math.min(108, H * 0.15);
-    const x = W / 2 - cw / 2, y0 = Math.min(H * 0.38, H - 3 * (ch + 14) - 100);
-    const ay = Math.min(y0 + 3 * (ch + 14) + 6, H - 86), aw = Math.min(150, (W - 36) / 2);
+    const ch = Math.min(108, Math.max(58, (H - 210) / n - 14));
+    const cw = Math.min(380, W * 0.92);
+    const x = W / 2 - cw / 2, y0 = Math.min(H * 0.38, H - n * (ch + 14) - 100);
+    const ay = Math.min(y0 + n * (ch + 14) + 6, H - 86), aw = Math.min(150, (W - 36) / 2);
     const cbw = Math.min(240, aw * 2);
     return { stacked, short, card: i => ({ x, y: y0 + i * (ch + 14), w: cw, h: ch }),
       confirm: { x: W / 2 - cbw / 2, y: ay, w: cbw, h: 36 },
       reroll: { x: W / 2 - aw - 6, y: ay + 44, w: aw, h: 32 },
       tree: { x: W / 2 + 6, y: ay + 44, w: aw, h: 32 } };
   }
-  const cw = Math.min(250, (W - 84) / 3), ch = Math.min(252, H * 0.4);
-  const gap = 22, total = cw * 3 + gap * 2;
+  const gap = n > 3 ? 14 : 22;
+  const cw = Math.min(250, (W - 60 - (n - 1) * gap) / n), ch = Math.min(252, H * 0.4);
+  const total = cw * n + gap * (n - 1);
   const cy = Math.min(H * 0.4, H - ch - 60);
   const ay = Math.min(cy + ch + 16, H - 48);
   // three-button row: REROLL · CONFIRM (widest — it's the primary action) · TREE
@@ -978,7 +983,28 @@ function rerollDraft() {
   G.rerolled = true;
   statsReroll();
   draftSel = null; // fresh hand, fresh inspection
+  // AFT-020 MASTERED finales: the reroll PINS the hand's best offer (apex >
+  // fusion > bridge > capstone > deepest tier) and rerolls only the rest —
+  // selection control, never an extra rank
+  const mastered = G.clearedStage === 2 && G.finale && G.finale.mastery && G.finale.mastery.mastered;
+  let pinned = null;
+  if (mastered && G.upgradeChoices) {
+    const rank = c => c.webKind === 'apex' ? 5 : c.webKind === 'fusion' ? 4 : c.webKind === 'bridge' ? 3
+      : c.pathKey ? (c.tierIdx === 3 ? 2 : 1) : 0;
+    pinned = G.upgradeChoices.slice().sort((a, b) => rank(b) - rank(a))[0] || null;
+  }
   rollUpgradeChoices();
+  if (pinned && G.upgradeChoices) {
+    const keyOf = c => c.pathKey ? 'p:' + c.pathKey : c.web ? 'w:' + c.web.key : 's:' + (c.stack && c.stack.key);
+    if (!G.upgradeChoices.some(c => keyOf(c) === keyOf(pinned))) {
+      // the pin may not smuggle a SECOND fusion/apex into the fresh hand
+      const bigPin = pinned.webKind === 'fusion' || pinned.webKind === 'apex';
+      const bigIdx = G.upgradeChoices.findIndex(c => c.webKind === 'fusion' || c.webKind === 'apex');
+      if (bigPin && bigIdx >= 0) G.upgradeChoices[bigIdx] = pinned;
+      else G.upgradeChoices[G.upgradeChoices.length - 1] = pinned;
+    }
+    setCombatNotice('MASTERED — YOUR BEST OFFER IS PINNED', '#ffd54f', 2);
+  }
   if (upgradeTreeOpen) syncTreeSelectionToDraft();
   SFX.wall();
 }
@@ -1170,6 +1196,8 @@ function onPress(x, y) {
         if (inRect(x, y, T.region(i))) {
           trialSel.region = i;
           if (i !== 0 && trialSel.round === 3) trialSel.round = 2;
+          // a RAID is one continuous encounter — only the full launch exists
+          if (((finaleProfile(i) || {}).format || 'ladder') === 'raid') trialSel.round = 0;
           trialSel.phase = 1; // new region = new boss — reset the practice phase
           SFX.wall(); return;
         }
@@ -1373,7 +1401,9 @@ function fireAction(auto = false) {
   // basic fire reaches overheat in about seven seconds; tapping with pauses
   // remains comfortably sustainable.
   const torrent = starterMod('heat', 1);
-  const masteryCool = Math.pow(0.94, G.stacks.ice || 0);
+  // §9.9: mastery cooling diminishes past five stacks and never drops heat
+  // generation below ~55% of its pre-mastery value
+  const masteryCool = Math.max(0.55, Math.pow(0.94, effStacks(G.stacks.ice || 0)));
   // HYPER CYCLE also runs the barrel cooler — without this, sustained fire is
   // heat-limited well below the faster cadence and the capstone adds no DPS
   const hyperCool = upgN('hyper') ? 0.85 : 1;
@@ -1439,6 +1469,7 @@ function fireCharge(c, resonant = false) {
   if (G.state !== 'play') return;
   if (!blasterArmed()) return; // no paddle gun in classic — the charge can never fire
   G.chargedEver = true; // the charge tutor banner retires once you've done it
+  G.lastChargeT = G.time; // the realm-1 DREAM MIRROR reads recent charges
   statsShotFired(true);
   if (resonant) statsResonant();
   // AEGIS LANCE: while shielded, a full charge SPENDS one real shield and the
@@ -1467,7 +1498,7 @@ function fireCharge(c, resonant = false) {
   // bar, so leaning on the charge (or chaining them) really can overheat you.
   // WAR MACHINE spends banked rail pressure to run the shot far cooler.
   const wmSpend = upgN('warmachine') ? G.railPressure : 0;
-  const heatMods = (1 - 0.25 * upgN('coolant')) * Math.pow(0.94, G.stacks.ice || 0) * starterMod('heat', 1)
+  const heatMods = (1 - 0.25 * upgN('coolant')) * Math.max(0.55, Math.pow(0.94, effStacks(G.stacks.ice || 0))) * starterMod('heat', 1)
     * (1 - 0.45 * wmSpend);
   addWeaponHeat((0.30 + 0.30 * c) * heatMods * (resonant ? 0.7 : 1));
   G.muzzle = 0.18;
@@ -1546,6 +1577,7 @@ function tryMega() {
   // REACTIVE OVERDRIVE: entering Mega regrows one missing shield (on cooldown)
   if (upgN('reactive') && G.reactiveCD <= 0 && G.shieldCharges < shieldCap()) {
     G.shieldCharges++;
+    statsShieldGain('reactive');
     G.reactiveCD = 20;
     addFloater(G.paddle.x, shipY() - 62, 'REACTIVE SHIELD!', '#dce775', 13);
     SFX.shield();

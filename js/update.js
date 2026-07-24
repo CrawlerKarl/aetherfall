@@ -63,7 +63,7 @@ function tickEffects(dt) {
     if (G[k]) { G[k].t -= dt; if (G[k].t <= 0) G[k] = null; }
   }
   if (G.megaT > 0) G.megaT = Math.max(0, G.megaT - dt);
-  else if (G.state === 'play') G.mega = Math.min(1, G.mega + dt * starterMod('megaPassive', 0));
+  else if (G.state === 'play') gainMega(dt * starterMod('megaPassive', 0), 'passive');
   G.starterChillT = Math.max(0, (G.starterChillT || 0) - dt);
   if (G.ballElement && fighting) {
     G.ballElementT -= dt;
@@ -158,9 +158,18 @@ function modePower(p) {
   if (!p || !p.key) return p;
   // classic no longer has a paddle gun, so a LASER drop would be dead — hand out
   // a MULTIBALL instead (fun, calm, and on-theme for the ball-first game).
-  if (G.mode === 'classic') return p.key === 'laser' ? POWERS.multi : p;
-  const swap = { multi: regionIdx(G.level) >= 1 ? 'draco' : 'star', magnet: 'shield', warp: 'star' };
-  return swap[p.key] ? POWERS[swap[p.key]] : p;
+  const out = (() => {
+    if (G.mode === 'classic') return p.key === 'laser' ? POWERS.multi : p;
+    // §9.9 drop audit: ghost/dark/poison ALL feed `multi`, and multi→draco
+  // alone flooded whole acts (57% of Act II drops in the closeout matrix).
+  // Alternating the remap by region halves the family's share.
+  const swap = { multi: regionIdx(G.level) >= 1 ? (regionIdx(G.level) % 2 ? 'draco' : 'star') : 'star', magnet: 'shield', warp: 'star' };
+    return swap[p.key] ? POWERS[swap[p.key]] : p;
+  })();
+  // AFT-008: every type-keyed drop routes through here — record the POST-remap
+  // key so the matrix can audit which power families flood a mode
+  if (out && out.key) statsDrop(out.key);
+  return out;
 }
 
 // ---- ENEMY FIRE DIRECTOR -------------------------------------------------
@@ -247,10 +256,11 @@ function spawnStarEnemyPattern(src, P, bx, by, d, volleyId) {
   // the player, so interception is the friendly's counterplay and dodging
   // stays yours.
   let aimX = G.paddle.x, aimY = shipY();
-  const fr = G.objective && G.objective.friendly;
+  const fr = (G.objective && G.objective.friendly)
+    || (G.friendlyList && G.friendlyList[0]) || null; // woken clocks draw fire too
   if (fr && !fr.dead && fr.fhp > 0 && P.aimed && P.classKey === 'micro') {
-    G.objective.redirN = (G.objective.redirN || 0) + 1;
-    if (G.objective.redirN % 2 === 0) { aimX = fr.bx + G.fx; aimY = fr.by + G.fy; }
+    G.redirN = (G.redirN || 0) + 1; // G-scoped: friendlies exist outside objectives now
+    if (G.redirN % 2 === 0) { aimX = fr.bx + G.fx; aimY = fr.by + G.fy; }
   }
   const base = P.aimed ? Math.atan2(aimY - by, aimX - bx) : Math.PI / 2;
   const sp = (225 + d.lv * 14) * d.shotSpeed * P.speedMul;
@@ -379,6 +389,28 @@ function spawnBossFire(br, bx, by, d, tg) {
   }
   if (tg.fan) {
     spawnBossAngles(br, bx, by, d, { count: 5, spread: 0.24, classKey: 'standard' });
+    return;
+  }
+  // THE FIRST DREAM (realm-1 coda): the mythic MIRRORS the player's weapon
+  // — a slow, readable dream version of whatever you've been firing. A
+  // recent charge is answered by one heavy dream orb; sustained fire by a
+  // gentle three-bolt fan in your own spread. Abilities/channels untouched.
+  if (br.mythic && G.finale && G.finale.format === 'ladder' && G.finale.realm === 0 && !br.secretBoss) {
+    const base = Math.atan2(shipY() - by, G.paddle.x - bx);
+    const sp = (170 + d.lv * 8) * d.shotSpeed * 0.8;
+    const kind = projectileKindFor(id, br.poke.t);
+    const vid = nextEnemyVolley();
+    const charged = (G.time - (G.lastChargeT ?? -99)) < 4 && G.lastChargeT != null;
+    if (charged) {
+      spawnEnemyShot({ x: bx, y: by, vx: Math.cos(base) * sp * 0.72, vy: Math.sin(base) * sp * 0.72,
+        boss: true, type: br.poke.t, species: id, kind, classKey: 'heavy', volleyId: vid });
+    } else {
+      for (let i = -1; i <= 1; i++) {
+        const a = base + i * 0.2;
+        spawnEnemyShot({ x: bx, y: by, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+          boss: true, type: br.poke.t, species: id, kind, classKey: 'micro', volleyId: vid });
+      }
+    }
     return;
   }
   switch (id) {
@@ -536,25 +568,36 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
   }
   // Late-run mastery remains useful in every mode (ball, bolts, missiles,
   // explosions) without recreating the old giant weapon-capstone spike.
-  if (dmg < 90 && G.stacks && G.stacks.orb) dmg *= 1 + 0.06 * G.stacks.orb;
-  if (dmg < 90 && stackN('fang')) dmg *= 1 + 0.07 * stackN('fang'); // VOID FANG (dark affinity)
-  if (dmg < 90 && meta.source === 'charge' && stackN('hex')) dmg *= 1 + 0.09 * stackN('hex'); // UMBRAL HEX
+  // AFT-008: dPre* checkpoints attribute the damage each multiplier CATEGORY
+  // adds (or removes) — the ledger's per-category breakdown rides the deltas.
+  const dPreStacks = dmg;
+  if (dmg < 90 && G.stacks && G.stacks.orb) dmg *= 1 + 0.06 * effStacks(G.stacks.orb);
+  if (dmg < 90 && stackN('fang')) dmg *= 1 + 0.07 * effStacks(stackN('fang')); // VOID FANG (dark affinity)
+  if (dmg < 90 && meta.source === 'charge' && stackN('hex')) dmg *= 1 + 0.09 * effStacks(stackN('hex')); // UMBRAL HEX
   if (dmg < 90 && G.secretUpg.lens) dmg *= 1.15;
+  statsDmgCat('stacks', dmg - dPreStacks);
+  const dPreWindow = dmg;
   if (br.staggerT > 0 && dmg < 90) dmg *= 1.35; // Psystrike stagger: the interrupt's reward window
+  statsDmgCat('window', dmg - dPreWindow);
+  const dPreVessel = dmg;
   const starterDirect = dmg < 90 && !meta.starterChain && !meta.behavior && !meta.linked;
   if (starterDirect && G.starter) {
     G.starterHits = (G.starterHits || 0) + 1;
     dmg *= starterMod('damage', 1);
-    if (starterPerk() === 'GUTS') {
+    // Perk gates key on the STARTER TYPE, never the skin's ability NAME —
+    // gating on it silently disabled these four perks under any other skin
+    // (a rules divergence; skins may differ in words and art only). The
+    // starterMod keys themselves are already type-line data, so the type
+    if (G.starter === 'fighting') { // GUTS / BERSERK PROTOCOL
       const missing = Math.max(0, (G.livesMax || G.lives) - G.lives);
       dmg *= 1 + missing * starterMod('guts', 0);
       if (br.isBoss) dmg *= starterMod('bossDamage', 1);
     }
-    if (starterPerk() === 'SAND FORCE' && (br.armored || br.shellArmor || br.barrier || br.isBoss)) {
+    if (G.starter === 'ground' && (br.armored || br.shellArmor || br.barrier || br.isBoss)) { // SAND FORCE / SEISMIC RIG
       dmg *= starterMod('armorDamage', 1);
     }
-    if (starterPerk() === 'MOXIE') dmg *= 1 + Math.min(G.combo, 20) * starterMod('comboDamage', 0);
-    if (starterPerk() === 'CORROSION') {
+    if (G.starter === 'dark') dmg *= 1 + Math.min(G.combo, 20) * starterMod('comboDamage', 0); // MOXIE / BLOODLUST
+    if (G.starter === 'poison') {
       br.starterCorrosion = Math.min(5, (br.starterCorrosion || 0) + 1);
       dmg *= 1 + (br.starterCorrosion - 1) * starterMod('corrosion', 0);
     }
@@ -565,6 +608,8 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
       ringFx(sx, sy, '#ec407a', 4, 46, 3, 0.3);
     }
   }
+  statsDmgCat('vessel', dmg - dPreVessel);
+  const dPreMatch = dmg;
   // type effectiveness: super effective ×2 (PRISM AMPLIFY pushes it further),
   // resisted ×¼ — unless the OMNI LENS capstone ignores resistances outright
   if (element && dmg < 90) {
@@ -572,7 +617,7 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
       dmg *= 2 * (upgN('amplify') ? 1.3 : 1);
       // AURORA DRIVE: super-effective hits feed the Mega ring (gold motes)
       if (upgN('aurora') && G.megaT <= 0) {
-        G.mega = Math.min(1, G.mega + 0.015);
+        gainMega(0.015, 'aurora');
         G.surgeFlash = Math.max(G.surgeFlash || 0, 0.4);
       }
       if (element === G.ballElement) G.resistStreak = 0;
@@ -606,6 +651,10 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
       }
     } else if (element === G.ballElement) G.resistStreak = 0;
   }
+  statsDmgCat('matchup', dmg - dPreMatch);
+  const dPreGuard = dmg;
+  // LUCERNA'S PRISM: the freed mythic holds the final window open
+  if (br.prismMark && dmg < 90) dmg *= 1.35;
   // SENTINEL GUARD / OPENING (round-1 gauntlet). Sentinels hold a guard that
   // halves incoming damage until they commit to their OWN special; the opening
   // it leaves (br.openT, set in subAbility, decayed in updateSentinels) takes
@@ -613,19 +662,206 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
   // like SHELL ARMOR — inside damageBrick, so the combat ledger stays honest
   // (no new loseLife path). STRICTLY gated on subBoss: it never touches
   // legendaries or mythics.
-  if (br.subBoss) {
+  // THE FIRST FUSION: the first Vessel struck opens the route; sealed
+  // roads shrug hits off; the linked pair SHARES every wound
+  if (br.vessel && !br.vesselRoute && !br.vesselSealed && chaseState()
+    && !chaseState().chosen && G.finale.beat === 0) {
+    chaseChooseRoute(br);
+  }
+  if (br.vesselSealed) {
+    br.flash = 1;
+    const C3 = chaseState();
+    if (C3 && (C3.sealCD || 0) <= 0) {
+      C3.sealCD = 1.1;
+      addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 12, chaseWord('sealWord', 'SEALED'), '#b0bec5', 10);
+    }
+    return;
+  }
+  // THE ECLIPSE RITE: a totem answers only its OWN rite — qualified hits
+  // ARE the rite (no wound), unqualified ones trickle ×0.25 attrition
+  if (br.totem && riteState() && G.finale.beat === 0 && dmg < 90) {
+    const R = G.finale.rite;
+    let qualified = false;
+    if (br.riteKind === 'opening') {
+      const gapA = (G.time * 0.9) % (Math.PI * 2);
+      const toPlayer = Math.atan2(shipY() - (br.by + G.fy), G.paddle.x - (br.bx + G.fx));
+      let dd2 = gapA - toPlayer;
+      while (dd2 > Math.PI) dd2 -= Math.PI * 2;
+      while (dd2 < -Math.PI) dd2 += Math.PI * 2;
+      qualified = Math.abs(dd2) < 0.55;
+    } else if (br.riteKind === 'pulse') {
+      qualified = ((G.finale.beatT + (br.subIdx || 0)) % 1.4) < 0.38;
+    } else qualified = br.riteRoot < 1;
+    if (qualified) {
+      br.riteHits = (br.riteHits || 0) + 1;
+      br.flash = 1;
+      const need = br.riteKind === 'root' ? 3 : 2;
+      if (br.riteHits >= need) { riteMark(br); return; }
+      addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 12,
+        'RITE ' + br.riteHits + '/' + need, '#5affc3', 11);
+      return; // the qualified strike IS the rite, never the wound
+    }
+    dmg *= 0.25;
+    if ((R.failCD || 0) <= 0) {
+      R.failCD = 1.1;
+      addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 12, riteWord('failWord', 'THE RITE RESISTS'), '#b0bec5', 10);
+    }
+  }
+  // UMBRIX holds your power — hits TAG it (three take everything back)
+  if (br.umbrix && riteState()) {
+    br.flash = 1;
+    const R = G.finale.rite;
+    if ((R.tagCD || 0) <= 0) {
+      R.tagCD = 0.4;
+      R.tags++;
+      G.finale.mastery.counters.tags = R.tags;
+      addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 12,
+        riteWord('tagWord', 'TAGGED') + ' ' + Math.min(3, R.tags) + '/3', '#5affc3', 12);
+      if (R.tags >= 3 && !R.reclaimed) riteReclaim();
+    }
+    return;
+  }
+  if (br.subBoss && !br.relayVow && !br.raidCaptain && !br.totem) { // relay Vows / raid captains / totems own ONE rule each — never the guard too
     if ((br.openT || 0) > 0) {
       if (!br.openHit) { br.openHit = true; dmg *= 1.2; } // window's first strike rewarded
+      // THE FRACTURED HOUR: open-window strikes AWAKEN a Sibyl instead of
+      // wearing it down — the third one turns it to your side unharmed
+      if (br.sibyl && G.finale && G.finale.hourglass && !br.sibylAwake) {
+        br.sibylHits = (br.sibylHits || 0) + 1;
+        br.flash = 1;
+        if (br.sibylHits >= 3) { sibylAwakens(br); return; }
+        addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 12,
+          'WAKING ' + br.sibylHits + '/3', '#a5d6a7', 11);
+        return; // the waking blow rings the clock, it doesn't wound it
+      }
     } else {
-      dmg *= 0.55; // guarded — punish mindless spray
+      dmg *= wardGuardMul(); // guarded — the realm-1 ward WEAKENS as Heralds fall
       if (!G.sentinelGuardTaught) {
         G.sentinelGuardTaught = true; // once per wave — announce STRIP, never a center card
         setAnnounce('alert', '#80d8ff', 'SENTINELS GUARD', 'STRIKE AFTER THEY ATTACK!', 2.6);
       }
     }
   }
+  // THE SERAPH RAID: the crown is the Sovereign's ONE defensive rule —
+  // ×0.25 while it stands (with an honest cue), ×1.35 in the failure
+  // window, plain ×1.0 after the window closes. Captains keep full-damage
+  // HP; their meter credit rides in raidCaptainHit below.
+  if (br.raidSeraph && G.finale && G.finale.raid && dmg < 90) {
+    const RD = G.finale.raid;
+    if (!RD.window) {
+      dmg *= 0.25;
+      if ((RD.shieldCD || 0) <= 0) {
+        RD.shieldCD = 1.1;
+        const word = (G.finale.profile && G.finale.profile.raid && G.finale.profile.raid.seraphShieldWord) || 'SHIELDED';
+        addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 14, word, '#b0bec5', 11);
+      }
+    } else if (RD.windowT > 0) dmg *= 1.35;
+  }
+  // SIEGE: the pressure seal is the Sovereign's ONE rule — near-immune
+  // while any Colossus stands (with an honest cue), plain damage after
+  if (br.siegeSov && G.finale && G.finale.siege && G.finale.beat === 0 && dmg < 90) {
+    const S = G.finale.siege;
+    dmg *= 0.12;
+    if ((S.sealCD || 0) <= 0) {
+      S.sealCD = 1.2;
+      const word = (G.finale.profile && G.finale.profile.siege && G.finale.profile.siege.sealWord) || 'SEALED';
+      addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 14, word, '#b0bec5', 11);
+    }
+  }
+  statsDmgCat('guard', dmg - dPreGuard);
+  // THE LIVE GRID: the first Paladin struck becomes THE DUEL (its siblings
+  // stand down as neutral terminals in the same breath)
+  if (br.paladin && !br.paladinDuel && !br.gridTerminal && circuitState()
+    && !circuitState().chosen && G.finale.beat === 0) {
+    circuitChooseDuel(br);
+  }
+  // neutral terminals: hits only matter on the CHARGED node mid-illumination
+  if (br.gridTerminal) {
+    br.flash = 1;
+    const C2 = circuitState();
+    if (C2 && C2.active && C2.active.node === br && !C2.active.fired) {
+      C2.active.hits = (C2.active.hits || 0) + 1;
+      burst(sx, sy, '#ffd166', 8, 180, 0.4);
+      addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 12,
+        'CHARGE ' + C2.active.hits + '/' + C2.active.need, '#ffd166', 11);
+      if (C2.active.hits >= C2.active.need) circuitRedirect();
+    } else if (C2 && (C2.termCD || 0) <= 0) {
+      C2.termCD = 1.1;
+      addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 12, 'A NEUTRAL TERMINAL', '#b0bec5', 10);
+    }
+    return;
+  }
+  // THE FRACTURED HOUR: the out-of-hour actor is a pale past — untouchable
+  // until the hours trade back (its ONE defensive rule)
+  if (br.hourOut) {
+    br.flash = 1;
+    const HG = hourglassState();
+    if (HG && HG.outCD <= 0) {
+      HG.outCD = 1.2;
+      addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 14, hourglassWord('outWord', 'OUT OF HOUR'), '#b0bec5', 11);
+    }
+    return;
+  }
+  // …and the Regent yields only while a woken clock RINGS (with an honest
+  // fallback: no clocks woken at all = a plain ×0.75 attrition)
+  if (br.isBoss && !br.mythic && !br.secretBoss && dmg < 90
+    && hourglassState() && G.finale.beat >= 1) {
+    const HG = G.finale.hourglass;
+    if (HG.awakened > 0) {
+      if (!hourglassRinging()) {
+        dmg *= 0.15;
+        if (HG.silentCD <= 0) {
+          HG.silentCD = 1.2;
+          addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 14,
+            hourglassWord('silentWord', 'THE HOURS ARE SILENT'), '#b0bec5', 11);
+        }
+      }
+    } else dmg *= 0.75;
+  }
+  // the raid mythic is a PRESENCE (bound) or a menace (freed) — never a
+  // required target, never a damage sink. Bound hits point at the vines.
+  if (br.raidBound) {
+    br.flash = 1;
+    if (!br.raidFreed && G.finale && G.finale.raid && (G.finale.raid.boundCD || 0) <= 0) {
+      G.finale.raid.boundCD = 1.2;
+      addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 14, 'BREAK THE VINES', '#b9f6ca', 11);
+    }
+    return;
+  }
+  // LIVE LANES: the marked target only yields to a player standing INSIDE
+  // the lane — an outside hit is turned aside with an honest cue
+  if (br.laneMark && G.objective && G.objective.type === 'lanes'
+    && !G.objective.done && !G.objective.failed && G.objective.laneX != null
+    && Math.abs(G.paddle.x - G.objective.laneX) > (G.objective.laneW || 140) / 2) {
+    br.flash = 1;
+    const O = G.objective;
+    if ((O.deflectCD || 0) <= 0) {
+      O.deflectCD = 0.9;
+      addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 12, 'ENTER THE LANE', '#ffd54f', 11);
+    }
+    return;
+  }
+  // THE GALE RELAY (AFT-020): Vows never lose HP to damage — a carrier hit
+  // feeds the pass meter (real, ledgered work); a non-carrier hit is turned
+  // by the wind (a readable deflect cue, no hidden progress). Direct kills
+  // (practice jumps, tests) still work: they bypass damageBrick entirely.
+  if (br.relayVow && G.finale && G.finale.relay && G.finale.beat === 0) {
+    relayVowHit(br, dmg, sx, sy, meta);
+    return;
+  }
   statsDmgOut(meta.source || 'other', Math.min(Math.max(0, br.hp), dmg));
   br.hp -= dmg;
+  // THE FIRST FUSION: the chained pair SHARES every wound — half of any
+  // hit mirrors to the partner (one linked work budget, never two bars)
+  if (br.chaseLinked && !meta.chaseMirror && chaseState() && dmg < 90) {
+    const partner = G.bricks.find(b => b.chaseLinked && !b.dead && b !== br);
+    if (partner) damageBrick(partner, dmg * 0.5, partner.bx + G.fx, partner.by + G.fy, null,
+      { source: 'other', noMega: true, chaseMirror: true });
+  }
+  // RAID captains: real HP damage AND Break-meter credit — the segment's
+  // own captain credits in full, the others at 35% (target order is an
+  // advantage, never a mandate)
+  if (br.raidCaptain && G.finale && G.finale.raid) raidCaptainHit(br, dmg);
   if (dmg < 90 && G.secretUpg.echo && !meta.secretEcho) {
     G.secretHit = (G.secretHit || 0) + 1;
     if (G.secretHit % 7 === 0) {
@@ -672,7 +908,7 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
     SFX.bossHit();
     // meta.noMega: fusion/apex area damage can never rebuild the meter it
     // spent (Cataclysm's declared guard) or quietly farm the boss for Mega
-    if (!meta.noMega) G.mega = Math.min(1, G.mega + 0.004);
+    if (!meta.noMega) gainMega(0.004, 'bossHits');
     // Phase count belongs to the encounter tier. STARFIGHTER legendaries
     // split at 50% (two phases), mythicals split at ⅔/⅓ (three), and the
     // sentinels never enter this boss-only transition path.
@@ -749,6 +985,52 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
   if (br.hp <= 0) {
     br.dead = true;
     statsKill();
+    if (br.reinf) statsKillRenew(); // renewable-population kill (AFT-008 farm audit)
+    // RAID: the last vine down frees the bound mythic (optional risk/reward)
+    if (br.raidVine && raidState() && !G.bricks.some(b => b.raidVine && !b.dead && b !== br)) raidFreeBound();
+    // SIEGE: a fallen Colossus is the player's ORDER choice landing
+    if (br.siegeColossus && siegeState()) siegeColossusDown(br);
+    // THE HUNT: real cells count, reflections shatter like lies; the
+    // prison's fall frees the imprisoned mythic
+    if (br.glassCell && huntState()) {
+      const HT = G.finale.hunt;
+      if (br.reflection) {
+        G.score += Math.round(50 * scoreMult());
+        setCombatNotice(huntWord('falseWord', 'ONLY A REFLECTION'), '#b0bec5', 1.2);
+      } else {
+        HT.realBroken++;
+        G.finale.mastery.counters.cells = HT.realBroken;
+        setCombatNotice(huntWord('realWord', 'A TRUE CELL BREAKS') + ' — ' + HT.realBroken + '/2', '#9CFF57', 1.6);
+        if (HT.realBroken >= 2 && !HT.fled) huntSerpentFlees();
+      }
+    }
+    if (br.lucPrison && huntState()) huntFreeMythic();
+    // THE TRIUNE WARD: a fallen Herald leaves a PERMANENT gap
+    if (br.subBoss && G.finale && G.finale.ward) {
+      G.finale.ward.fallen++;
+      if (G.finale.ward.fallen < 3) setCombatNotice('THE WARD BREAKS — THEIR GUARD WEAKENS', '#9CFF57', 1.8);
+    }
+    // AFT-020 non-attrition objectives: source and marked-target kills
+    if (br.wardSrc && G.objective && G.objective.type === 'wardbreak' && !G.objective.done) {
+      const O = G.objective;
+      O.left = Math.max(0, (O.left || 0) - 1);
+      O.progress = O.total ? 1 - O.left / O.total : 0;
+      if (O.left > 0) setCombatNotice('WARD SOURCE DOWN — ' + O.left + ' LEFT', '#9CFF57', 1.4);
+      else completeNonAttrition(O, O.name || 'WARD CLEANSED');
+    }
+    if (G.objective && G.objective.type === 'undercard' && !G.objective.done && !br.crosser && !br.friendly) {
+      const O2 = G.objective;
+      O2.crowd = Math.min(1, (O2.crowd || 0) + 0.055 + (G.combo >= 5 ? 0.02 : 0));
+      O2.progress = O2.crowd;
+      if (O2.crowd >= 1) completeNonAttrition(O2, O2.name || 'THE CROWD ROARS');
+    }
+    if (br.laneMark && G.objective && G.objective.type === 'lanes' && !G.objective.done && !G.objective.failed) {
+      const O = G.objective;
+      O.hits = (O.hits || 0) + 1;
+      O.progress = O.hits / O.count;
+      if (O.hits < O.count) setCombatNotice('MARK DOWN — ' + O.hits + '/' + O.count, '#ffd54f', 1.4);
+      else completeNonAttrition(O, O.name || 'LANES RUN');
+    }
     if (br.isBoss) statsBossPhaseMark(br, br.phase); // close the final phase clock
     if (G.runStats) {
       G.runStats.bricksBroken++;
@@ -771,7 +1053,7 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
       // BONUS FLOCK reward: chaining the harmless crossers pays score + Mega
       G.score += 150;
       addFloater(br.bx + G.fx, br.by + G.fy - 20, '+150 BONUS', '#80d8ff', 13);
-      if (G.megaT <= 0) G.mega = Math.min(1, G.mega + 0.03);
+      if (G.megaT <= 0) gainMega(0.03, 'kills');
     }
     if (G.starter) {
       G.starterKOs = (G.starterKOs || 0) + 1;
@@ -794,16 +1076,22 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
     // RALLY MASTER's shooter translation: kills are the only tempo there, so
     // they charge much harder (×2.5 total) — mega lands roughly every 2 waves
     const rallyKill = upgN('rally') ? (br.isBoss ? 0.04 : (G.mode !== 'classic' ? 0.012 : 0.004)) : 0;
-    if (G.megaT <= 0) G.mega = Math.min(1, G.mega + (br.isBoss ? 0.12 : 0.008) + rallyKill
-      + 0.009 * stackN('tithe')); // BLOOD TITHE (dark affinity)
+    // §9.6: an endlessly-renewed add (objective reinforcements) feeds NO
+    // kill economy — budgeted kills keep paying as before
+    const renewableKill = br.reinf && G.objective && !G.objective.done && !G.objective.failed;
+    if (G.megaT <= 0 && !renewableKill) {
+      gainMega((br.isBoss ? 0.12 : 0.008) + rallyKill, 'kills');
+      gainMega(0.009 * stackN('tithe'), 'tithe'); // BLOOD TITHE (dark affinity)
+    }
     // HALO WARD (light affinity): a kill-count rhythm that raises a shield
-    if (stackN('halo')) {
+    if (stackN('halo') && !renewableKill) {
       G.haloKills = (G.haloKills || 0) + 1;
       const need = Math.max(9, 25 - 4 * (stackN('halo') - 1));
       if (G.haloKills >= need) {
         G.haloKills = 0;
         if (G.shieldCharges < shieldCap()) {
           G.shieldCharges++;
+          statsShieldGain('halo');
           addFloater(G.paddle.x, shipY() - 30, 'HALO WARD +1', '#fff59d', 12);
           SFX.power();
         }
@@ -899,6 +1187,7 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
         * starterMod('healChance', 1));
       if (missingHp > 0 && (G.healthDropPity >= starterMod('healPity', 10) || gameRand() < healChance)) {
         G.healthDropPity = 0;
+        statsDrop('heal');
         G.powerups.push({ x: br.bx + G.fx, y: br.by + G.fy, vy: 112, p: POWERS.heal, rot: 0, hint: true });
       } else if (gameRand() < d.dropChance) {
         const p = modePower(POWERS[POWER_BY_TYPE[br.poke.t] || 'star']);
@@ -1141,7 +1430,7 @@ function awardRally(b, x, y) {
   if (b.rally < 3) return;
   const bonus = Math.round(b.rally * 15 * scoreMult() * (upgN('rally') ? 1.5 : 1));
   G.score += bonus;
-  if (G.megaT <= 0) G.mega = Math.min(1, G.mega + 0.0035); // rallies feed Mega
+  if (G.megaT <= 0) gainMega(0.0035, 'rally'); // rallies feed Mega
   if (b.rally === 3 || b.rally % 3 === 0) {
     const hot = b.rally >= 9;
     addFloater(x, y - 22, 'RALLY ×' + b.rally + '  +' + bonus, hot ? '#ff7043' : '#ffd54f', 13 + Math.min(9, b.rally));
@@ -1228,7 +1517,7 @@ function collectPickup(pu) {
   if (pu.p && pu.p.key === 'heal') webGuardianCharge();
   // GRACE LIGHT (light affinity): mending also banks Mega
   if (pu.p && pu.p.key === 'heal' && stackN('grace') && G.megaT <= 0) {
-    G.mega = Math.min(1, G.mega + 0.15 * stackN('grace'));
+    gainMega(Math.min(0.4, 0.15 * effStacks(stackN('grace'))), 'grace'); // §9.9: one potion banks ≤40% Surge
   }
   if (pu.secretShard || pu.p.key === 'riftShard') {
     const i = Math.max(0, Math.min(2, pu.shardIndex || 0));
@@ -1863,11 +2152,23 @@ function bossAbility(boss) {
 // drafts gain pity weight; mastery satellites only fill EMPTY slots — never
 // crowding out an authored node — capped-wedge satellites first.
 function rollUpgradeChoices() {
+  // AFT-020 VICTORY DRAFT: a finale clear deals a wider hand — FOUR offers
+  // base, FIVE once the signature answer was COUNTERED. Mastery changes
+  // VISIBILITY and reroll control only, never rank count, and the
+  // one-fusion/apex-per-hand rule holds at every hand size (only the
+  // EXPLORE slot ever deals a web special).
+  const handN = (G.clearedStage === 2 && G.finale && G.finale.mastery && G.finale.mastery.clear)
+    ? (G.finale.mastery.countered ? 5 : 4) : 3;
   const rerolledFrom = G.rerolled ? (G.lastOfferKeys || []) : [];
   const bridges = WEB_BRIDGES.filter(bridgeEligible);
   const fusions = WEB_FUSIONS.filter(fusionEligible);
   const apexes = WEB_APEXES.filter(apexEligible);
   const needDefense = G.lives < Math.max(2, Math.ceil((G.livesMax || preset().lives) * 0.6));
+  // AFT-020: a caught siege WISH leans the hand's SHAPE (never its size or
+  // rank count) — commit deepens the invested route, adapt guarantees the
+  // survival slot, explore favors the web specials
+  const wish = (G.clearedStage === 2 && G.finale && G.finale.wish) || null;
+  const maxInv = Math.max(0, ...PATH_KEYS.map(k => pathLvl(k)));
   const seen = G.webSeen || (G.webSeen = {});
   const pity = key => Math.min(3, Math.max(0, (seen[key] || 0) - 3));
   const avoid = key => rerolledFrom.includes(key) ? 9 : 0;
@@ -1875,6 +2176,7 @@ function rollUpgradeChoices() {
   const scoreCont = k =>
     pathLvl(k) * 4 + gameRand() * 2 + pity(contKey(k)) - avoid(contKey(k)) +
     (needDefense && ['defense', 'utility'].includes(PATHS[k].family) ? 5 : 0) +
+    (wish === 'commit' && pathLvl(k) > 0 && pathLvl(k) === maxInv ? 6 : 0) +
     (G.mode === 'classic' && PATHS[k].family === 'offense' && pathLvl(k) === 2 ? 4 : 0);
   const rankedCont = PATH_KEYS.filter(k => pathLvl(k) < 4)
     .map(k => ({ k, s: scoreCont(k) })).sort((a, b) => b.s - a.s).map(x => x.k);
@@ -1896,7 +2198,7 @@ function rollUpgradeChoices() {
     const f = fusions.map(d => ({ d, s: 8 + pity(d.key) - avoid(d.key) + gameRand() * 2 }))
       .sort((a, b) => b.s - a.s)[0].d;
     webPicked.push({ def: f, kind: 'fusion' });
-  } else if (bridges.length && (freshForm || !rankedCont.length || gameRand() < 0.75)) {
+  } else if (bridges.length && (freshForm || wish === 'explore' || !rankedCont.length || gameRand() < 0.75)) {
     const b = bridges.map(d => ({ d, s: 6 + pity(d.key) - avoid(d.key) + gameRand() * 2 }))
       .sort((a, b) => b.s - a.s)[0].d;
     webPicked.push({ def: b, kind: 'bridge' });
@@ -1907,20 +2209,20 @@ function rollUpgradeChoices() {
   // FORCED when health is low (otherwise the top-ranked option keeps reroll
   // hands honestly fresh — scoring already leans defensive at low health)
   takeCont(k => pathLvl(k) >= 1) || takeCont();
-  if (needDefense) takeCont(k => ['defense', 'utility'].includes(PATHS[k].family)) || takeCont();
+  if (needDefense || wish === 'adapt') takeCont(k => ['defense', 'utility'].includes(PATHS[k].family)) || takeCont();
   else takeCont();
   // offense/non-offense guard while both groups remain among continuations
   for (const wantOffense of [true, false]) {
     const has = picked.some(k => (PATHS[k].family === 'offense') === wantOffense);
     const avail = rankedCont.some(k => !used.has(k) && (PATHS[k].family === 'offense') === wantOffense);
     if (!has && avail) {
-      if (picked.length + webPicked.length >= 3 && picked.length) { used.delete(picked[picked.length - 1]); picked.pop(); }
+      if (picked.length + webPicked.length >= handN && picked.length) { used.delete(picked[picked.length - 1]); picked.pop(); }
       takeCont(k => (PATHS[k].family === 'offense') === wantOffense);
     }
   }
   // top up: remaining continuations, then bridges — never a SECOND fusion or
   // apex in the same hand (the plan's one-per-hand rule)
-  while (picked.length + webPicked.length < 3) {
+  while (picked.length + webPicked.length < handN) {
     if (takeCont()) continue;
     const b2 = bridges.find(b => !webPicked.some(w => w.def.key === b.key));
     if (b2) { webPicked.push({ def: b2, kind: 'bridge' }); continue; }
@@ -1957,13 +2259,13 @@ function rollUpgradeChoices() {
   }
   // mastery satellites fill EMPTY slots only — capped home wedges first, so
   // the late run always has a useful pick without burying authored content
-  if (choices.length < 3) {
+  if (choices.length < handN) {
     // one seeded draw per satellite, THEN sort by the precomputed key —
     // gameRand() inside a comparator consumes an engine-defined number of
     // draws and desyncs seeded runs across browsers
     const sats = activeSatellites().map(sat => ({ sat, item: stackItem(sat.stackKey), r: gameRand() }))
       .sort((a, b) => ((pathLvl(b.sat.path) >= 4 ? 1 : 0) - (pathLvl(a.sat.path) >= 4 ? 1 : 0)) || (a.r - b.r));
-    for (const { item } of sats) if (choices.length < 3) choices.push({ stack: item });
+    for (const { item } of sats) if (choices.length < handN) choices.push({ stack: item });
   }
   // pity + reroll memory: every eligible node not in this hand ages a draft
   const handKeys = choices.map(c => c.pathKey ? contKey(c.pathKey) : c.web ? c.web.key : 'stack:' + c.stack.key);
@@ -1974,6 +2276,9 @@ function rollUpgradeChoices() {
   G.lastOfferKeys = handKeys;
   G.lastDraftForm = webForm();
   G.upgradeChoices = choices.length ? choices : null;
+  // AFT-008: record every dealt hand so offer frequency can normalize pick rates
+  if (choices.length) statsOffer(choices.map(c =>
+    c.web ? c.web.key : c.stack ? 'stack:' + c.stack.key : c.pathKey || '?'));
 }
 
 // A shield charge absorbs one lethal hit on the player (enemy shot or column
@@ -2002,7 +2307,7 @@ function absorbHit(x, y, shotType = null, volleyId = null) {
   SFX.shield();
   // REACTIVE OVERDRIVE: the break feeds the Mega ring — gold surge on the rig
   if (upgN('reactive') && G.megaT <= 0) {
-    G.mega = Math.min(1, G.mega + 0.15);
+    gainMega(0.15, 'reactive');
     G.surgeFlash = 1;
     addFloater(G.paddle.x, y - 64, lex('+15% MEGA'), '#dce775', 12);
   }
@@ -2142,6 +2447,7 @@ function webRelicProcs(ev) {
       G.rescueN = 0;
       if (G.shieldCharges < shieldCap()) {
         G.shieldCharges++;
+        statsShieldGain('rescue');
         ringFx(G.paddle.x, shipY(), '#ff8a80', 5, 54, 3, 0.4);
         addFloater(G.paddle.x, shipY() - 34, 'WARDING ORBIT!', '#ff8a80', 12);
         SFX.shield();
@@ -2184,7 +2490,7 @@ function webGuardianCharge() {
     G.guardCharge = 0;
     G.guardPulsedWave = true;
     for (const s of G.enemyShots) if (!s.boss) s.dead = true;
-    if (G.lives < Math.max(1, G.livesMax)) { G.lives++; G.hurtHud = 2.6; }
+    if (G.lives < Math.max(1, G.livesMax)) { G.lives++; G.hurtHud = 2.6; statsLifeGain('fusion'); }
     ringFx(G.paddle.x, shipY(), '#b9f6ca', 12, 230, 6, 0.7);
     ringFx(G.paddle.x, shipY(), '#f8bbd0', 8, 160, 4, 0.55);
     sparkle(G.paddle.x, shipY() - 30, 10, true);
@@ -2347,8 +2653,8 @@ function celestialSector(k) {
       damageBrick(br, 1, br.bx + G.fx, br.by + G.fy, el, { noMega: true });
     }
   }
-  if (G.shieldCharges < shieldCap()) G.shieldCharges++;
-  else if (G.lives < Math.max(1, G.livesMax)) { G.lives++; G.hurtHud = 2.6; }
+  if (G.shieldCharges < shieldCap()) { G.shieldCharges++; statsShieldGain('fusion'); }
+  else if (G.lives < Math.max(1, G.livesMax)) { G.lives++; G.hurtHud = 2.6; statsLifeGain('fusion'); }
   G.ballElement = el;
   G.ballElementT = Math.max(G.ballElementT, 4);
   G.resistStreak = 0;
@@ -2797,17 +3103,115 @@ function completeProtect(O, name) {
 // extra punishment — the wave reverts to a normal attrition clear (the clear
 // guard ignores failed objectives) and the banner disappears.
 function friendlyFaints(fr) {
-  const O = G.objective;
   fr.dead = true;
   shatterBrick(fr, fr.bx + G.fx, fr.by + G.fy, true); // bare faint
+  // an awakened SIBYL clock falling silent is a loss of tempo, never an
+  // objective fail — the finale's ring windows just thin out
+  if (fr.sibyl) {
+    setAnnounce('star', '#ff80ab', 'A CLOCK FALLS SILENT', 'THE RING WINDOWS THIN', 2.2,
+      null, null, false, false, 'objective');
+    SFX.hit(0); haptic('hit');
+    return;
+  }
+  const O = G.objective;
   if (O) { O.failed = true; statsObjective(O.type, false); }
   setAnnounce('star', '#ff80ab', 'THE TRAVELER FELL — CLEAR THE WAVE!', '', 2.4,
     null, null, false, false, 'objective');
   SFX.hit(0); haptic('hit');
 }
+// AFT-020: complete a non-attrition objective — the remaining ordinary
+// population stands down. Shooter modes disperse the flock into fleeing
+// crossers; classic's warded wall collapses (a card-shatter cascade).
+function completeNonAttrition(O, name) {
+  O.done = true;
+  O.progress = 1;
+  statsObjective(O.type, true);
+  G.score += Math.round(600 * scoreMult());
+  if (G.mode === 'classic') {
+    for (const b of G.bricks) {
+      if (b.dead || b.barrier || b.isBoss || b.subBoss || b.crosser || b.friendly) continue;
+      shatterBrick(b, b.bx + G.fx, b.by + G.fy, bareMon(b));
+      b.dead = true;
+    }
+  } else disperseSwarm();
+  G.reinforce = 0; // outsmarting the wave ENDS it — never a grind epilogue
+  setAnnounce('star', '#9CFF57', name, '+600 — THE WAVE STANDS DOWN', 2.6);
+  SFX.stageClear();
+}
 function updateObjective(dt) {
   const O = G.objective;
-  if (!O || G.mode !== 'junkie' || G.state !== 'play' || O.done || O.failed) return;
+  if (!O || G.state !== 'play' || O.done || O.failed) return;
+  // wardbreak/lanes/bells run in EVERY mode; the older families stay junkie-only
+  const crossMode = ['wardbreak', 'lanes', 'bells', 'undercard'].includes(O.type);
+  if (G.mode !== 'junkie' && !crossMode) return;
+  // WARDBREAK: the kill hook counts sources; attrition still resolves it
+  // (every source death decrements, however it happened)
+  if (O.type === 'undercard'
+    && !G.bricks.some(b => !b.dead && !b.barrier && !b.crosser && !b.friendly)) {
+    // no crowd left to please — revert to the ordinary clear
+    O.failed = true;
+    statsObjective(O.type, false);
+    return;
+  }
+  if (O.type === 'wardbreak' || O.type === 'undercard') return; // kill hooks own their progress
+  // BELLS: cross the three zones IN ORDER, holding each until it rings —
+  // pure positioning, works identically in every mode
+  if (O.type === 'bells') {
+    // an EMPTIED board never waits forever: ten seconds of victory-lap
+    // grace to ring the rest, then the objective stands down and the
+    // ordinary clear proceeds (the no-hostage contract)
+    if (!G.bricks.some(b => !b.dead && !b.barrier && !b.crosser && !b.friendly)) {
+      O.graceT = (O.graceT || 0) + dt;
+      if (O.graceT >= 10) {
+        O.failed = true;
+        statsObjective(O.type, false);
+        setCombatNotice('THE BELLS FALL SILENT — MOVE ON', '#b0bec5', 1.8);
+        return;
+      }
+    }
+    const zx = O.zones[Math.min(O.rung, O.zones.length - 1)];
+    if (Math.abs(G.paddle.x - zx) < O.zoneW / 2) {
+      O.dwellT += dt;
+      if (O.dwellT >= O.dwell) {
+        O.dwellT = 0;
+        O.rung++;
+        tone(560 + O.rung * 140, 0.35, 'sine', 0.09);
+        ringFx(zx, G.mode === 'junkie' ? shipY() : PADDLE_Y() - 30, '#ffd54f', 10, 110, 4, 0.55);
+        if (O.rung >= O.count) completeNonAttrition(O, O.name || 'BELLS RUNG');
+        else setCombatNotice('BELL ' + O.rung + '/' + O.count + ' RINGS!', '#ffd54f', 1.4);
+      }
+    } else O.dwellT = Math.max(0, O.dwellT - dt * 2);
+    O.progress = Math.min(1, (O.rung + O.dwellT / O.dwell) / O.count);
+    return;
+  }
+  // LANES: the safe lane cycles between three slots; ONE marked target at a
+  // time is vulnerable only from inside the lane
+  if (O.type === 'lanes') {
+    if (O.deflectCD > 0) O.deflectCD -= dt;
+    O.laneT = (O.laneT || 0) + dt;
+    if (O.laneT >= 7) { O.laneT = 0; O.laneSlot = ((O.laneSlot || 0) + 1) % 3; }
+    const slots = [W * 0.26, W * 0.5, W * 0.74];
+    const targetX = slots[O.laneSlot || 0];
+    O.laneX = (O.laneX == null ? W / 2 : O.laneX) + (targetX - O.laneX) * Math.min(1, dt * 3);
+    if (!G.bricks.some(b => !b.dead && b.laneMark)) {
+      const pool = G.bricks.filter(b => !b.dead && !b.barrier && !b.crosser && !b.friendly
+        && !b.isBoss && !b.subBoss && !b.entry);
+      if (pool.length) {
+        let best = pool[0], bd = Infinity;
+        for (const b of pool) {
+          const d2 = Math.abs(b.bx + G.fx - O.laneX);
+          if (d2 < bd) { bd = d2; best = b; }
+        }
+        best.laneMark = true;
+      } else {
+        // nothing left to mark — the circuit can't finish: revert to attrition
+        O.failed = true;
+        statsObjective(O.type, false);
+      }
+    }
+    O.progress = (O.hits || 0) / O.count;
+    return;
+  }
   // PROTECT: while the friendly lives, hold the swarm's pressure and read out
   // its progress. Its faint (fhp→0) is handled at the enemy-shot collision.
   if (O.type === 'escort' || O.type === 'defend') {
@@ -2992,7 +3396,8 @@ function updateReveal(dt) {
   // reveal DELIVERED the boss card's content), arm the restart grace
   G.reveal = null;
   if (r.kind !== 'sentinels') {
-    G.revealDock = r.ids[0];
+    // a coda presence is not a fight — no HP lane docks for it
+    if (!(G.finale && G.finale.codaHold)) G.revealDock = r.ids[0];
     // the DOCK BEAT: one readable impact pop where the portrait landed —
     // strokes + glints only (ringFx/sparkle honor the effects ladder), so
     // the moment reads on every rung and reduced-effects stays calm
@@ -3023,6 +3428,8 @@ function updateReveal(dt) {
 // Shared by the trial picker, the dev launcher, and the boss test harness.
 function jumpToGauntletRound(round, phase) {
   if (!(round > 0) || !G.gauntlet) return;
+  // a RAID is one continuous encounter — there is no round to jump to
+  if (G.finale && G.finale.format === 'raid') return;
   // AFT-004: banners/entrances/story cards from earlier rounds do not follow
   // a jump — only the run-level trial notice survives; the wake/summon below
   // queues exactly ONE boss reveal for the selected round.
@@ -3049,10 +3456,1247 @@ function jumpToBossPhase(round, phase) {
   boss.phase = ph;
   boss.hp = Math.max(1, Math.round(boss.maxHp * ((pc - ph + 0.5) / pc)));
 }
+// ---- AFT-020 finale director (Phase 1: an adapter over the gauntlet — the
+// gauntlet still drives combat; the director records format/beat/clock/
+// mastery state so Trial, presentation and the ledger read one contract).
+// Phase 2 flips the drive direction for the first non-ladder formats.
+function startFinaleBeat(i) {
+  const F = G.finale; if (!F || i === F.beat) return;
+  F.beatClocks[F.beatKey] = +(((F.beatClocks[F.beatKey] || 0) + F.beatT)).toFixed(1);
+  F.beat = i; F.beatT = 0;
+  const fmt = FINALE_FORMATS[F.format] || FINALE_FORMATS.ladder;
+  F.beatKey = fmt.beats[i] || ('beat' + i);
+}
+function completeFinale() {
+  const F = G.finale; if (!F || F.mastery.clear) return;
+  F.beatClocks[F.beatKey] = +(((F.beatClocks[F.beatKey] || 0) + F.beatT)).toFixed(1);
+  F.beatT = 0;
+  F.mastery.clear = true;
+  // per-format mastery resolution — 'countered' is the signature answer done
+  // once; 'mastered' is every authored major-beat counter
+  if (F.format === 'relay' && F.relay) {
+    F.mastery.countered = F.mastery.countered || (F.relay.cleanPasses >= 1);
+    F.mastery.mastered = F.relay.cleanPasses >= F.relay.need
+      && (F.mastery.counters.blooms || 0) >= 4;
+  }
+  if (F.format === 'raid' && F.raid) {
+    F.mastery.countered = (F.mastery.counters.segmentsBroken || 0) >= 1;
+    F.mastery.mastered = (F.mastery.counters.segmentsBroken || 0) >= 3;
+  }
+  if (F.format === 'siege' && F.siege) {
+    // countered = the seal fell to a chosen order (set at station 3);
+    // mastered = the trail's lesson learned — not one current hit taken
+    F.mastery.mastered = F.mastery.countered && (F.mastery.counters.trailHits || 0) === 0;
+  }
+  if (F.format === 'ladder' && F.ward) {
+    // countered = the memory broken at least once (two anchors denied);
+    // mastered = countered AND every memory echo escaped
+    F.mastery.mastered = F.mastery.countered && !(F.mastery.counters.echoHits > 0);
+  }
+  if (F.format === 'hourglass' && F.hourglass) {
+    // countered = at least one Sibyl woken; mastered = all three woken AND
+    // all three clocks still standing at the end
+    F.mastery.mastered = (F.mastery.counters.sibyls || 0) >= 3
+      && G.bricks.filter(b => b.sibylAwake && !b.dead).length >= 3;
+  }
+  if (F.format === 'circuit' && F.circuit) {
+    // countered = one redirect turned home; mastered = three, plus glory
+    // (the flame's wake ridden long enough to matter)
+    F.mastery.mastered = (F.circuit.redirects || 0) >= 3 && (F.circuit.flameT || 0) >= 5;
+  }
+  if (F.format === 'hunt' && F.hunt) {
+    // countered = the prisoner freed; mastered = freed with not one shadow
+    // sector ever closing on the vessel
+    F.mastery.mastered = !!F.hunt.freed && (F.hunt.sectorHits || 0) === 0;
+  }
+  if (F.format === 'rite' && F.rite) {
+    // countered = the stolen power reclaimed; mastered = reclaimed with
+    // every totem's mark earned
+    F.mastery.mastered = !!F.rite.reclaimed && (F.rite.marks || 0) >= 3;
+  }
+  if (F.format === 'chase' && F.chase) {
+    // countered = one chain baited apart; mastered = every chain AND every lock
+    F.mastery.mastered = (F.chase.chains || 0) >= 3 && (F.chase.locks || 0) >= 3;
+  }
+  const L = statsCur();
+  const result = F.mastery.mastered ? 'mastered' : F.mastery.countered ? 'countered' : 'clear';
+  if (L) {
+    L.finaleFormat = F.format;
+    L.finaleBeatT = { ...F.beatClocks };
+    L.finaleCounters = { ...F.mastery.counters };
+    L.finaleMastery = result;
+  }
+  awardCrest(F.realm, result); // durable recognition, never power (real journeys only)
+}
+// ---- THE GALE RELAY (AFT-020 Phase 2 — the first non-ladder format) ----
+// Beat 0: the three Vows pass ONE storm core. Only the carrier takes real
+// damage (it feeds the PASS METER — 3 × 0.14 BE); the other two turn hits
+// aside and the wind holds a TRUE-AIM CORRIDOR over the carrier's lane —
+// bolts (and the classic ball's calm air) fly straight inside it, drift
+// outside it. Beat 1: the Sovereign descends with its own storm kit.
+// Beat 2: the coda REWINDS the storm into blooms — a reward event.
+function relayAliveVows() {
+  const out = [];
+  for (const b of G.bricks) if (b.relayVow && !b.dead && !b.crosser) out.push(b);
+  return out;
+}
+function relayCarrierBrick() {
+  const R = G.finale && G.finale.relay;
+  if (!R) return null;
+  const vows = relayAliveVows();
+  return vows.find(v => v.subIdx === R.carrier) || vows[0] || null;
+}
+// the corridor: live during the relay beat only — {x, w, dir}
+function relayLane() {
+  const F = G.finale;
+  if (!F || !F.relay || F.beat !== 0 || F.mastery.clear || G.state !== 'play') return null;
+  const R = F.relay;
+  if (R.laneX == null) R.laneX = W / 2;
+  return { x: R.laneX, w: R.laneW, dir: (Math.floor(F.beatT / 6) % 2) ? 1 : -1 };
+}
+function relayVowHit(br, dmg, sx, sy, meta) {
+  const F = G.finale, R = F.relay;
+  br.flash = 1; // keeps the pierce i-frame honest
+  if (br !== relayCarrierBrick()) {
+    // turned by the wind — a readable "not the target" cue, throttled
+    if ((R.deflectCD || 0) <= 0) {
+      R.deflectCD = 0.8;
+      const word = (F.profile && F.profile.relay && F.profile.relay.deflectWord) || 'DEFLECTED';
+      addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 12, word, '#b0bec5', 11);
+      ringFx(br.bx + G.fx, br.by + G.fy, '#b0bec5', 4, 40, 2, 0.3);
+    }
+    return;
+  }
+  statsDmgOut(meta.source || 'other', dmg); // carrier work is REAL work
+  R.dealt += dmg;
+  R.carrierHits = (R.carrierHits || 0) + 1;
+  F.meter.value = R.passes + Math.min(1, R.dealt / R.passHp);
+  burst(sx, sy, '#80d8ff', 6, 160, 0.35);
+  if (R.dealt >= R.passHp) relayCompletePass();
+}
+function relayCompletePass() {
+  const F = G.finale, R = F.relay;
+  const from = relayCarrierBrick();
+  R.passes++;
+  const clean = !R.rotSincePass;
+  if (clean) R.cleanPasses++;
+  F.mastery.counters.cleanPasses = R.cleanPasses;
+  R.dealt = 0; R.carryT = 0; R.rotSincePass = false;
+  F.meter.value = R.passes;
+  if (from) {
+    addFloater(from.bx + G.fx, from.by + G.fy - from.h / 2 - 18,
+      'PASS ' + Math.min(R.passes, R.need) + '/' + R.need + (clean ? ' · CLEAN!' : ''),
+      clean ? '#ffd54f' : '#80d8ff', 15);
+    ringFx(from.bx + G.fx, from.by + G.fy, '#80d8ff', 8, 120, 4, 0.5);
+  }
+  SFX.wall();
+  if (R.passes >= R.need) {
+    F.mastery.countered = R.cleanPasses >= 1; // the signature answer, done at least once
+    relayDisperseVows();
+    gauntletWake(); // the Sovereign descends into the STILL-RUNNING encounter
+    return;
+  }
+  relayRotateCarrier();
+}
+function relayRotateCarrier() {
+  const R = G.finale.relay;
+  const vows = relayAliveVows();
+  if (vows.length <= 1) return;
+  const cur = relayCarrierBrick();
+  const next = vows[(vows.indexOf(cur) + 1) % vows.length];
+  R.carrier = next.subIdx;
+  if (cur && next) {
+    ringFx(cur.bx + G.fx, cur.by + G.fy, '#40c4ff', 6, 70, 3, 0.4);
+    ringFx(next.bx + G.fx, next.by + G.fy, '#40c4ff', 10, 90, 4, 0.5);
+    sparkle(next.bx + G.fx, next.by + G.fy, 6);
+  }
+}
+function relayDisperseVows() {
+  // the Vows flee as crossers — outside every formation/clear system
+  for (const b of G.bricks) {
+    if (!b.relayVow || b.dead) continue;
+    b.subBoss = false; b.relayVow = false; b.bare = true;
+    b.hp = b.maxHp = 1;
+    b.crosser = { vx: (b.bx < W / 2 ? -1 : 1) * 300, bobPh: (b.subIdx || 0) * 2.1 };
+  }
+}
+function relayBeginCoda(gen2) {
+  const F = G.finale;
+  const fp = F.profile;
+  const mid = gen2.gauntlet && gen2.gauntlet.myth;
+  F.coda = { t: 0, dur: 14, spawned: 0, blooms: 6 };
+  F.codaHold = true;
+  if (mid) {
+    // the Hourseed drifts serenely across the healed sky — present, never hostile
+    const vw2 = Math.min(120, W * 0.16);
+    const verd = {
+      bx: -vw2, by: Math.max(140, H * 0.24), hx: -vw2, hy: Math.max(140, H * 0.24),
+      row: -3, col: 0, w: vw2, h: vw2 * 0.9, hp: 1, maxHp: 1,
+      bare: true, poke: { id: mid[0], t: mid[1], n: SKIN.names[mid[0]] },
+      crosser: { vx: Math.max(46, W / 13), bobPh: 0 }, flash: 0, wobble: 0,
+    };
+    G.bricks.push(verd);
+    getSprite(mid[0]);
+    beginBossReveal('mythic', [verd]); // her portrait deserves the scene — nothing hostile resumes after
+  }
+  const label = (fp && fp.beats[2] && fp.beats[2].label) || 'THE REWIND';
+  const tip = (fp && fp.beats[2] && fp.beats[2].tip) || 'GATHER THE BLOOMS';
+  setAnnounce('leaf', '#b9f6ca', label, tip, 3.4, null, null, false, true, 'boss');
+  F.meter = { value: 0, max: F.coda.blooms, label: (fp && fp.relay && fp.relay.bloomName) || 'BLOOM' };
+}
+function updateRelayCoda(dt) {
+  const F = G.finale, C = F.coda;
+  if (!C) return;
+  C.t += dt;
+  const due = Math.min(C.blooms, Math.floor(C.t / (C.dur / C.blooms)) + 1);
+  while (C.spawned < due) {
+    C.spawned++;
+    const margin = Math.max(60, W * 0.14);
+    G.powerups.push({
+      x: margin + gameRand() * (W - margin * 2), y: -18, vy: 66,
+      p: { key: 'bloom', name: (F.profile && F.profile.relay && F.profile.relay.bloomName) || 'BLOOM' },
+      rot: 0, hint: C.spawned === 1,
+    });
+  }
+  if (C.t >= C.dur && C.spawned >= C.blooms) F.codaHold = false; // falling pickups still hold the clear
+}
+// ---- THE SERAPH RAID (AFT-020 Phase 2 — the simultaneous format) ----
+// No rounds: the Sovereign, the captains, and the bound mythic all matter
+// from the first second. Each crown segment ASSEMBLES on a visible clock
+// (teach: segment 1 is slow and announced); damaging its owner captain
+// fills the BREAK meter (full credit; other captains 35%). A broken
+// segment leaves temporary cover; a completed one fires ONE telegraphed
+// lane punish and moves on; a dead owner fizzles its segment. Freeing the
+// bound mythic tears the current segment open — and turns it loose. When
+// all three resolve, the weapon fails: a 6s coordinated window (×1.35),
+// then a plain fight to the finish.
+function raidState() { return (G.finale && G.finale.format === 'raid' && G.finale.raid) || null; }
+function raidCaptainHit(br, dmg) {
+  const F = G.finale, RD = F.raid;
+  const S = RD.segments[RD.seg];
+  if (!S || S.state !== 'assembling' || RD.window) return;
+  const credit = dmg * (br.subIdx === S.owner ? 1 : 0.35);
+  S.broken += credit;
+  F.meter.value = Math.min(1, S.broken / RD.segNeed);
+  if (S.broken >= RD.segNeed) raidResolveSegment('broken');
+}
+function raidResolveSegment(how) {
+  const F = G.finale, RD = F.raid;
+  const S = RD.segments[RD.seg];
+  if (!S || S.state !== 'assembling') return;
+  S.state = how;
+  const word = (F.profile && F.profile.raid && F.profile.raid.segmentWord) || 'SEGMENT';
+  if (how === 'broken' || how === 'torn') {
+    if (how === 'broken') F.mastery.counters.segmentsBroken = (F.mastery.counters.segmentsBroken || 0) + 1;
+    setCombatNotice(word + ' ' + (RD.seg + 1) + (how === 'torn' ? ' TORN OPEN!' : ' SHATTERED!'), '#80d8ff', 1.6);
+    const seraph = G.bricks.find(b => b.raidSeraph && !b.dead);
+    if (seraph) {
+      burst(seraph.bx + G.fx, seraph.by + G.fy - seraph.h * 0.7, '#80d8ff', 26, 320, 0.6);
+      ringFx(seraph.bx + G.fx, seraph.by + G.fy, '#80d8ff', 8, 160, 4, 0.5);
+    }
+    // the shattered piece falls as temporary cover (shooter modes — it
+    // intercepts enemy fire like any barrier; classic has no fire to stop)
+    if (how === 'broken' && G.mode !== 'classic') {
+      G.bricks.push({
+        bx: W / 2 + (RD.seg - 1) * Math.min(140, W * 0.18), by: H * 0.5,
+        hx: W / 2 + (RD.seg - 1) * Math.min(140, W * 0.18), hy: H * 0.5,
+        row: -5, col: RD.seg, w: 54, h: 22, hp: 3, maxHp: 3,
+        bare: true, barrier: true, raidCover: true,
+        poke: { id: 0, t: 'steel', n: word },
+        flash: 0, wobble: RD.seg * 1.7,
+      });
+    }
+    SFX.wall();
+  } else if (how === 'fired') {
+    setCombatNotice(word + ' ' + (RD.seg + 1) + ' DISCHARGES!', '#ff8a80', 1.6);
+  } else if (how === 'fizzled') {
+    setCombatNotice(word + ' ' + (RD.seg + 1) + ' — ITS CAPTAIN IS DOWN', '#b0bec5', 1.6);
+  }
+  RD.seg++;
+  if (RD.seg === 1 && F.beat === 0) startFinaleBeat(1);
+  if (RD.seg >= RD.segments.length) { raidWeaponFails(); return; }
+  const next = RD.segments[RD.seg];
+  next.state = 'assembling'; next.t = 0;
+  F.meter.value = 0;
+}
+function raidSegmentFires(S) {
+  // ONE heavy telegraphed lane punish through the shared lane primitive —
+  // never in classic (the calm contract routes it through spawnEnemyShot,
+  // but a lane strike is authored danger, so it simply doesn't fire there)
+  if (G.mode === 'classic') return;
+  const px = Math.max(60, Math.min(W - 60, G.paddle.x));
+  G.columnStrikes.push({ x: px, w: 96, warn: 1.6, strike: 0.5, color: '#ff8a80' });
+  SFX.enrage();
+}
+function raidFreeBound() {
+  const F = G.finale, RD = F.raid;
+  if (RD.freed) return;
+  RD.freed = true;
+  F.mastery.counters.freed = 1;
+  const bnd = G.bricks.find(b => b.raidBound && !b.dead);
+  const word = (F.profile && F.profile.raid && F.profile.raid.freeWord) || 'UNBOUND!';
+  setAnnounce('alert', '#b9f6ca', word, null, 2.6);
+  if (bnd) {
+    bnd.raidFreed = true;
+    burst(bnd.bx + G.fx, bnd.by + G.fy, '#b9f6ca', 30, 300, 0.7);
+    ringFx(bnd.bx + G.fx, bnd.by + G.fy, '#b9f6ca', 8, 140, 4, 0.6);
+    if (G.mode === 'classic') {
+      // calm contract: she tears the crown and leaves — never a threat
+      bnd.crosser = { vx: (bnd.bx < W / 2 ? -1 : 1) * 280, bobPh: 0 };
+    }
+  }
+  const S = RD.segments[RD.seg];
+  if (S && S.state === 'assembling') raidResolveSegment('torn');
+  SFX.roar();
+}
+function raidDisperse() {
+  // the Sovereign has fallen — the arena empties. Surviving captains stand
+  // down and flee with the freed (or still-bound) mythic; nothing optional
+  // may hold the wave hostage, and there is NO cleanup round.
+  const RD = G.finale && G.finale.raid;
+  if (!RD || RD.dispersed) return;
+  RD.dispersed = true;
+  for (const b of G.bricks) {
+    if (b.dead) continue;
+    if (b.raidVine) { b.dead = true; continue; }
+    if (b.raidBound || b.raidCaptain) {
+      b.subBoss = false; b.raidCaptain = false;
+      if (!b.crosser) b.crosser = { vx: (b.bx < W / 2 ? -1 : 1) * 280, bobPh: (b.subIdx || 0) * 1.7 };
+    }
+  }
+}
+function updateRaid(dt) {
+  const F = G.finale, RD = F.raid;
+  if (RD.shieldCD > 0) RD.shieldCD -= dt;
+  if (RD.boundCD > 0) RD.boundCD -= dt;
+  const seraph = G.bricks.find(b => b.raidSeraph);
+  if (!seraph || seraph.dead) { raidDisperse(); return; }
+  if (RD.window) { RD.windowT = Math.max(0, RD.windowT - dt); return; }
+  const S = RD.segments[RD.seg];
+  if (!S) return;
+  const owner = G.bricks.find(b => b.raidCaptain && !b.dead && b.subIdx === S.owner);
+  if (!owner) { raidResolveSegment('fizzled'); return; }
+  if (S.state === 'assembling') {
+    S.t += dt;
+    if (S.t >= RD.assembleDur * spiralTellMul()) {
+      raidSegmentFires(S);
+      raidResolveSegment('fired');
+    }
+  }
+}
+function raidWeaponFails() {
+  const F = G.finale, RD = F.raid;
+  if (RD.window) return;
+  RD.window = true; RD.windowT = 6;
+  startFinaleBeat(2);
+  F.meter = null; // beat 2 is a plain fight — the HUD dock owns the read
+  const tip = (F.profile && F.profile.beats[2] && F.profile.beats[2].tip) || 'STRIKE NOW';
+  const label = (F.profile && F.profile.beats[2] && F.profile.beats[2].label) || 'THE WEAPON FAILS';
+  setAnnounce('alert', '#ffd54f', label, tip, 3, null, null, false, true, 'boss');
+  // the recovery contract between beats: clear hostile lanes + vent heat
+  for (const s of G.enemyShots) if (!s.boss) s.dead = true;
+  G.columnStrikes.length = 0;
+  G.heat = Math.max(0, G.heat - 0.5);
+  G.shake = 10; SFX.mega();
+}
+function updateFinaleDirector(dt) {
+  const F = G.finale;
+  if (!F || G.state !== 'play' || G.reveal) return;
+  if (F.format === 'raid' && F.raid) updateRaid(dt);
+  if (F.format === 'siege' && F.siege) updateSiege(dt);
+  if (F.format === 'hourglass' && F.hourglass) updateHourglass(dt);
+  if (F.format === 'hunt' && F.hunt) updateHunt(dt);
+  if (F.format === 'rite' && F.rite) updateRite(dt);
+  if (F.format === 'chase' && F.chase) {
+    if (F.chase.sealCD > 0) F.chase.sealCD -= dt;
+    updateChase(dt);
+  }
+  if (F.format === 'circuit' && F.circuit) {
+    const C = F.circuit;
+    if (C.termCD > 0) C.termCD -= dt;
+    // the duel meter reads the chosen Paladin's remaining fight
+    if (F.beat === 0 && C.chosen != null && F.meter) {
+      const duel = G.bricks.find(b => b.paladinDuel && !b.dead);
+      if (duel) F.meter.value = 1 - duel.hp / duel.maxHp;
+    }
+    updateCircuit(dt);
+  }
+  if (F.format === 'ladder' && F.memory) updateLadderMemory(dt);
+  if (F.format === 'relay' && F.relay) {
+    const R = F.relay;
+    if (R.deflectCD > 0) R.deflectCD -= dt;
+    if (F.beat === 0) {
+      const car = relayCarrierBrick();
+      if (car) {
+        // the corridor eases onto the carrier's live lane
+        if (R.laneX == null) R.laneX = W / 2;
+        R.laneX += ((car.bx + G.fx) - R.laneX) * Math.min(1, dt * 2.2);
+        R.carryT += dt;
+        if (R.carryT >= R.carryDur * spiralTellMul()) { // the core moves on — unfinished work carries over
+          R.carryT = 0; R.rotSincePass = true;
+          relayRotateCarrier();
+        }
+      }
+    }
+    if (F.beat === 2) updateRelayCoda(dt);
+  }
+}
+// ---- THE FIRST COVENANT's authored rules (AFT-020 Phase 4, realm 1) ----
+// The TRIUNE WARD: the Heralds are one mechanism — each fallen Herald
+// permanently weakens the survivors' guard. VELMORA REMEMBERS: blink steps
+// record the player's position and echo back as delayed lane strikes;
+// denying two of the Sovereign's focus ANCHORS breaks the memory open.
+function wardGuardMul() {
+  const F = G.finale;
+  if (!F || !F.ward) return 0.55; // the classic sentinel guard everywhere else
+  return [0.55, 0.75, 0.9][Math.min(2, F.ward.fallen)] || 0.9;
+}
+function finaleAnchorDenied() {
+  const F = G.finale;
+  if (!F || !F.ward || F.beat !== 1) return;
+  F.ward.anchorsDown = (F.ward.anchorsDown || 0) + 1;
+  if (F.ward.anchorsDown < 2) return;
+  F.ward.anchorsDown = 0;
+  const boss = G.bricks.find(b => b.isBoss && !b.dead && !b.mythic && !b.secretBoss);
+  if (!boss) return;
+  boss.staggerT = Math.max(boss.staggerT || 0, 1.8);
+  F.mastery.counters.memoryBreaks = (F.mastery.counters.memoryBreaks || 0) + 1;
+  F.mastery.countered = true;
+  setCombatNotice('THE MEMORY BREAKS — STRIKE!', '#80d8ff', 1.8);
+  ringFx(boss.bx + G.fx, boss.by + G.fy, '#80d8ff', 8, 130, 4, 0.5);
+  SFX.wall();
+}
+function updateLadderMemory(dt) {
+  const F = G.finale;
+  if (!F || !F.memory || !F.memory.length) return;
+  for (let i = F.memory.length - 1; i >= 0; i--) {
+    const m = F.memory[i];
+    m.t += dt;
+    if (m.t < 1.4) continue;
+    F.memory.splice(i, 1);
+    if (m.taught || G.mode === 'classic') {
+      // the harmless demonstration (and classic's whole calm treatment):
+      // a ghost ring where the memory would have struck
+      ringFx(m.x, G.mode === 'junkie' ? shipY() : PADDLE_Y() - 40, '#ec407a', 6, 64, 3, 0.4);
+      continue;
+    }
+    G.columnStrikes.push({ x: m.x, w: 74, warn: 1.2, strike: 0.45, color: '#ec407a', echo: true });
+  }
+}
+// ---- THE FIRST FUSION (AFT-020 Phase 6, realm 9) ----
+function chaseState() { return (G.finale && G.finale.format === 'chase' && G.finale.chase) || null; }
+function chaseWord(k, fallback) {
+  const F = G.finale;
+  return (F && F.profile && F.profile.chase && F.profile.chase[k]) || fallback;
+}
+function chaseChooseRoute(br) {
+  const F = G.finale, C = F.chase;
+  C.chosen = br.subIdx || 0;
+  br.vesselRoute = true;
+  br.hp = br.maxHp = Math.max(3, Math.round((G.gauntlet ? G.gauntlet.legendHp : 20) * 0.3));
+  F.meter = { value: 0, max: 1, label: (br.poke.n || 'THE ROUTE').toUpperCase() };
+  for (const b of G.bricks) {
+    if (!b.vessel || b === br || b.dead) continue;
+    b.subBoss = false; b.vesselSealed = true;
+    b.hp = b.maxHp = 999;
+    b.openT = 0;
+  }
+  setCombatNotice(chaseWord('routeWord', 'YOUR ROAD OPENS') + ' · '
+    + chaseWord('sealWord', 'THE OTHERS SEAL'), '#ffcf5e', 2.4);
+  ringFx(br.bx + G.fx, br.by + G.fy, '#ffcf5e', 8, 120, 4, 0.5);
+  SFX.roar();
+}
+function chaseBeginRush(boss) {
+  const F = G.finale, C = F.chase;
+  C.rush = {
+    t: 0, warn: 1.4 * spiralTellMul(), run: 0.8, fired: false,
+    y: G.mode === 'junkie' ? shipY() : PADDLE_Y() - 60,
+    dir: boss.bx + G.fx < W / 2 ? 1 : -1, hit: false,
+  };
+  setCombatNotice('THE CHARGE COMES — MOVE!', '#ff8a80', 1.2);
+  SFX.enrage();
+}
+function chaseResolveRush(boss) {
+  const F = G.finale, C = F.chase, R = C.rush;
+  C.rush = null;
+  if (R.hit) return; // a landed charge shatters nothing
+  if (F.beat === 1) {
+    C.locks = Math.min(3, C.locks + 1);
+    F.mastery.counters.locks = C.locks;
+    setCombatNotice(chaseWord('lockWord', 'A LOCK SHATTERS') + ' — ' + C.locks + '/3', '#ffcf5e', 1.8);
+    G.shake = 8;
+    if (C.locks >= 3) chaseLink(boss);
+    return;
+  }
+  // the CLIMAX: a missed charge that passed OVER the puppeteer breaks a chain
+  const mar = G.bricks.find(b => b.chaseLinked && b.mythic && !b.dead);
+  if (mar && Math.abs((mar.by + G.fy) - R.y) < 90) {
+    C.chains = Math.min(3, C.chains + 1);
+    F.mastery.counters.chains = C.chains;
+    F.mastery.countered = true;
+    const jolt = b2 => {
+      if (!b2 || b2.dead) return;
+      damageBrick(b2, Math.max(1, b2.maxHp * 0.08), b2.bx + G.fx, b2.by + G.fy, null,
+        { source: 'other', noMega: true });
+      ringFx(b2.bx + G.fx, b2.by + G.fy, '#ffcf5e', 8, 130, 4, 0.55);
+    };
+    jolt(boss); jolt(mar);
+    setCombatNotice(chaseWord('chainWord', 'A CHAIN BREAKS') + ' — ' + C.chains + '/3', '#9CFF57', 1.8);
+    if (C.chains >= 3 && !C.exposed) {
+      C.exposed = true;
+      for (const b2 of G.bricks) if (b2.chaseLinked && !b2.dead) b2.prismMark = true; // the exposure window
+      setAnnounce('alert', '#ffcf5e', chaseWord('exposedWord', 'THE PAIR IS EXPOSED'), null, 2.6);
+      SFX.mega();
+    }
+  }
+}
+function chaseLink(boss) {
+  const F = G.finale, C = F.chase;
+  if (C.linked) return;
+  C.linked = true;
+  if (G.gauntlet) G.gauntlet.phase = 2;
+  startFinaleBeat(2);
+  const gen2 = genFor(G.level);
+  const mid = gen2.gauntlet && gen2.gauntlet.myth;
+  if (boss) boss.chaseLinked = true;
+  if (mid) {
+    const mw = Math.min(140, Math.max(92, W * 0.15));
+    const mar = {
+      bx: W * 0.3, by: Math.max(170, H * 0.3), hx: W * 0.3, hy: Math.max(170, H * 0.3),
+      row: -1, col: 1, w: mw, h: mw * 0.92,
+      hp: Math.max(6, Math.round(G.gauntlet.legendHp * 0.45)),
+      maxHp: Math.max(6, Math.round(G.gauntlet.legendHp * 0.45)),
+      phase: 1, phaseCount: 1, isBoss: true, mythic: true, chaseLinked: true,
+      poke: { id: mid[0], t: mid[1], n: SKIN.names[mid[0]] },
+      flash: 0, wobble: 1.8,
+      abilityCD: (SKIN.mythicAbilities[mid[0]]?.cd || 5) * 0.9,
+    };
+    G.bricks.push(mar);
+    getSprite(mid[0]);
+    beginBossReveal('mythic', [mar]);
+  }
+  // the puppets drop with their strings cut — the stage belongs to the pair
+  for (const b of G.bricks) {
+    if (b.vesselSealed && !b.dead) {
+      b.vesselSealed = false;
+      b.crosser = { vx: (b.bx < W / 2 ? -1 : 1) * 300, bobPh: (b.subIdx || 0) * 1.7 };
+    }
+  }
+  setAnnounce('alert', '#ffcf5e',
+    (F.profile && F.profile.beats[2] && F.profile.beats[2].label) || 'THE CHAINED CROWN',
+    (F.profile && F.profile.beats[2] && F.profile.beats[2].tip) || '', 3,
+    null, null, false, true, 'boss');
+}
+function updateChase(dt) {
+  const F = G.finale, C = F.chase;
+  if (F.beat === 0 && C.chosen != null && F.meter) {
+    const duel = G.bricks.find(b => b.vesselRoute && !b.dead);
+    if (duel) F.meter.value = 1 - duel.hp / duel.maxHp;
+  }
+  if (F.beat !== 1 && F.beat !== 2) return;
+  if (F.meter) F.meter = null;
+  const boss = G.bricks.find(b => b.isBoss && !b.dead && !b.mythic);
+  if (!boss) return;
+  // the sealed Vessels dance as MARIONETTES through the pursuit — a slow
+  // puppet bob on invisible strings (their volleys stay in the fire pool)
+  for (const b of G.bricks) {
+    if (b.dead || !b.vesselSealed) continue;
+    b.by = b.hy + Math.sin(G.time * 1.3 + (b.subIdx || 0) * 2) * 22;
+    b.bx = b.hx + Math.sin(G.time * 0.8 + (b.subIdx || 0)) * 30;
+  }
+  // THE CHARGE: a warned horizontal rush through the vessel's own band —
+  // classic keeps its calm (the rush passes high, a pacing beat only)
+  if (C.rush) {
+    const R = C.rush;
+    R.t += dt;
+    if (!R.fired && R.t >= R.warn) {
+      R.fired = true;
+      R.x = R.dir > 0 ? -60 : W + 60;
+    }
+    if (R.fired) {
+      R.x += R.dir * (W + 120) / R.run * dt;
+      if (G.mode !== 'classic' && !R.hit && G.invuln <= 0
+        && Math.abs(R.x - G.paddle.x) < 46 && Math.abs(R.y - shipY()) < 40) {
+        R.hit = true;
+        if (!absorbHit(G.paddle.x, shipY())) {
+          G.invuln = 2;
+          loseLife('THE CHARGE');
+        }
+      }
+      if ((R.dir > 0 && R.x > W + 80) || (R.dir < 0 && R.x < -80)) chaseResolveRush(boss);
+    }
+    return;
+  }
+  C.rushCD -= dt;
+  if (C.rushCD <= 0) {
+    C.rushCD = F.beat === 2 ? 8 : 9;
+    chaseBeginRush(boss);
+  }
+}
+// ---- THE ECLIPSE RITE (AFT-020 Phase 6, realm 7) ----
+function riteState() { return (G.finale && G.finale.format === 'rite' && G.finale.rite) || null; }
+function riteWord(k, fallback) {
+  const F = G.finale;
+  return (F && F.profile && F.profile.rite && F.profile.rite[k]) || fallback;
+}
+function riteMark(br) {
+  const F = G.finale, R = F.rite;
+  R.marks++;
+  F.mastery.counters.marks = R.marks;
+  if (F.meter) F.meter.value = R.marks;
+  br.subBoss = false; br.totem = false;
+  br.crosser = { vx: (br.bx < W / 2 ? -1 : 1) * 300, bobPh: (br.subIdx || 0) * 1.9 };
+  setCombatNotice(riteWord('markWord', 'A MARK IS YOURS') + ' — ' + R.marks + '/3', '#5affc3', 2);
+  ringFx(br.bx + G.fx, br.by + G.fy, '#5affc3', 8, 120, 4, 0.55);
+  sparkle(br.bx + G.fx, br.by + G.fy, 10, true);
+  SFX.mega();
+}
+function riteUmbrixSteal() {
+  const F = G.finale, R = F.rite;
+  const gen2 = genFor(G.level);
+  const mid = gen2.gauntlet && gen2.gauntlet.myth;
+  if (!mid || R.reclaimed) return;
+  const amt = Math.min(G.mega, 0.25);
+  if (amt < 0.1) return; // nothing worth drinking
+  G.mega -= amt;
+  R.stolen += amt;
+  if (F.beat === 1) startFinaleBeat(2);
+  let u = G.bricks.find(b => b.umbrix && !b.dead);
+  if (!u) {
+    const uw = Math.min(84, W * 0.12);
+    u = {
+      bx: W * 0.5, by: Math.max(160, H * 0.28), hx: W * 0.5, hy: Math.max(160, H * 0.28),
+      row: -7, col: 0, w: uw, h: uw * 0.95, hp: 999, maxHp: 999,
+      bare: true, umbrix: true, poke: { id: mid[0], t: mid[1], n: SKIN.names[mid[0]] },
+      flash: 0, wobble: 0.9,
+    };
+    G.bricks.push(u);
+    getSprite(mid[0]);
+  }
+  setCombatNotice(riteWord('stealWord', 'IT DRINKS YOUR POWER'), '#b388ff', 2.2);
+  burst(G.paddle.x, shipY(), '#b388ff', 24, 300, 0.6);
+  SFX.hit(0);
+}
+function riteReclaim() {
+  const F = G.finale, R = F.rite;
+  R.reclaimed = true;
+  F.mastery.counters.reclaimed = 1;
+  F.mastery.countered = true;
+  gainMega(R.stolen, 'reclaim');
+  R.stolen = 0;
+  const boss = G.bricks.find(b => b.isBoss && !b.dead && !b.mythic);
+  if (boss) {
+    damageBrick(boss, Math.max(1, boss.maxHp * 0.08), boss.bx + G.fx, boss.by + G.fy, null,
+      { source: 'other', noMega: true });
+    ringFx(boss.bx + G.fx, boss.by + G.fy, '#5affc3', 10, 170, 5, 0.65);
+  }
+  const u = G.bricks.find(b => b.umbrix && !b.dead);
+  if (u) { u.umbrix = false; u.crosser = { vx: (u.bx < W / 2 ? -1 : 1) * 340, bobPh: 0 }; }
+  setAnnounce('star', '#5affc3', riteWord('reclaimWord', 'YOUR POWER RETURNS'), null, 2.8);
+  SFX.mega();
+}
+function updateRite(dt) {
+  const F = G.finale, R = F.rite;
+  if (R.failCD > 0) R.failCD -= dt;
+  if (R.tagCD > 0) R.tagCD -= dt;
+  if (F.beat === 0) {
+    // the growing roots: closing resets that rite's progress, loudly
+    for (const b of G.bricks) {
+      if (b.dead || !b.totem || b.riteKind !== 'root') continue;
+      b.riteRoot += dt / 9;
+      if (b.riteRoot >= 1) {
+        b.riteRoot = 0;
+        if (b.riteHits > 0) {
+          b.riteHits = 0;
+          setCombatNotice(riteWord('failWord', 'THE RITE RESISTS'), '#b0bec5', 1.4);
+        }
+      }
+    }
+    return;
+  }
+  const boss = G.bricks.find(b => b.isBoss && !b.dead && !b.mythic);
+  if (!boss || boss.dead) {
+    // the moon has set — the saboteur keeps nothing and holds nothing
+    const u = G.bricks.find(b => b.umbrix && !b.dead);
+    if (u) { u.umbrix = false; u.crosser = { vx: (u.bx < W / 2 ? -1 : 1) * 340, bobPh: 0 }; }
+    return;
+  }
+  // the MOON STATE: bright and dark crescents trade rule on a slow clock
+  R.moonT += dt;
+  if (R.moonT >= R.moonEvery * spiralTellMul()) {
+    R.moonT = 0;
+    R.moon = R.moon === 'bright' ? 'dark' : 'bright';
+    setCombatNotice(R.moon === 'bright'
+      ? riteWord('brightWord', 'THE BRIGHT CRESCENT RULES')
+      : riteWord('darkWord', 'THE DARK CRESCENT RULES'),
+    R.moon === 'bright' ? '#ffe082' : '#b388ff', 1.6);
+  }
+  // the umbrix patrol weaves while it holds your power
+  const u = G.bricks.find(b => b.umbrix && !b.dead);
+  if (u) {
+    u.bx = W / 2 + Math.sin(G.time * 0.9) * W * 0.3;
+    u.by = Math.max(150, H * 0.26) + Math.sin(G.time * 1.7) * 30;
+    u.hx = u.bx; u.hy = u.by;
+  }
+  // crescent GATES: the active moon's set fires — bright is two WIDE slow
+  // lanes, dark is three NARROW quick ones (shape, never color alone), and
+  // every totem MARK keeps one lane dark (the safe stars)
+  if (G.mode !== 'classic') {
+    R.gateCD -= dt;
+    if (R.gateCD <= 0) {
+      R.gateCD = R.moon === 'bright' ? 8 : 6;
+      const lanes = R.moon === 'bright' ? [0.3, 0.7] : [0.22, 0.5, 0.78];
+      const wCol = R.moon === 'bright' ? 110 : 62;
+      const warn = R.moon === 'bright' ? 1.5 : 1.1;
+      const fireN = Math.max(1, lanes.length - R.marks);
+      for (let i = 0; i < fireN; i++) {
+        G.columnStrikes.push({ x: W * lanes[i], w: wCol, warn: warn + i * 0.2, strike: 0.4,
+          color: R.moon === 'bright' ? '#ffe082' : '#b388ff' });
+      }
+    }
+    // the FULL ECLIPSE: the saboteur drinks on its own slow clock
+    R.stealCD -= dt;
+    if (R.stealCD <= 0) {
+      R.stealCD = 20;
+      if (G.megaT <= 0 && !R.reclaimed) riteUmbrixSteal();
+    }
+  }
+}
+// ---- THE FALSE FOUNDATION (AFT-020 Phase 5, realm 6) ----
+function huntState() { return (G.finale && G.finale.format === 'hunt' && G.finale.hunt) || null; }
+function huntWord(k, fallback) {
+  const F = G.finale;
+  return (F && F.profile && F.profile.hunt && F.profile.hunt[k]) || fallback;
+}
+function huntSerpentFlees() {
+  const F = G.finale, HT = F.hunt;
+  for (const b of G.bricks) {
+    if (b.dead) continue;
+    if (b.serpent && b.subBoss) {
+      // the hunt ends with the Serpent UNBEATEN — it slips away as a
+      // crosser and the round controller wakes the shadow
+      b.subBoss = false; b.serpent = false;
+      b.crosser = { vx: (b.bx < W / 2 ? -1 : 1) * 340, bobPh: 0 };
+    }
+    if (b.glassCell && !b.dead) { b.dead = true; shatterBrick(b, b.bx + G.fx, b.by + G.fy, true); }
+  }
+  HT.fled = true;
+  setCombatNotice(huntWord('fleeWord', 'THE SERPENT FLEES'), '#ff9ecb', 2.2);
+  SFX.roar();
+}
+function huntFreeMythic() {
+  const F = G.finale, HT = F.hunt;
+  if (HT.freed) return;
+  HT.freed = true;
+  F.mastery.counters.freed = 1;
+  F.mastery.countered = true;
+  const gen2 = genFor(G.level);
+  const mid = gen2.gauntlet && gen2.gauntlet.myth;
+  if (mid) {
+    const vw2 = Math.min(100, W * 0.14);
+    G.bricks.push({
+      bx: W * 0.85, by: Math.max(160, H * 0.26), hx: W * 0.85, hy: Math.max(160, H * 0.26),
+      row: -3, col: 0, w: vw2, h: vw2 * 0.9, hp: 1, maxHp: 1,
+      bare: true, poke: { id: mid[0], t: mid[1], n: SKIN.names[mid[0]] },
+      crosser: { vx: -Math.max(30, W / 22), bobPh: 0 }, flash: 0, wobble: 0,
+    });
+    getSprite(mid[0]);
+  }
+  const boss = G.bricks.find(b => b.isBoss && !b.dead && !b.mythic);
+  if (boss) {
+    boss.prismMark = true; // her prism holds the final window open
+    ringFx(boss.bx + G.fx, boss.by + G.fy, '#ff9ecb', 10, 170, 5, 0.65);
+  }
+  setAnnounce('star', '#ff9ecb', huntWord('freeWord', 'THE PRISONER IS FREE'), null, 3, null, null, false, true, 'boss');
+  sparkle(W * 0.85, Math.max(160, H * 0.26), 12, true);
+  SFX.mega();
+}
+function updateHunt(dt) {
+  const F = G.finale, HT = F.hunt;
+  if (F.meter && F.beat === 0) F.meter.value = HT.realBroken;
+  if (F.beat !== 1 && F.beat !== 2) return;
+  if (F.meter) F.meter = null; // the shadow beats read from the HUD dock
+  const boss = G.bricks.find(b => b.isBoss && !b.dead && !b.mythic);
+  if (!boss) return;
+  // deep in the shadow fight the prison APPEARS — the rescue beat
+  if (!HT.prison && bossLastStand(boss)) {
+    HT.prison = true;
+    startFinaleBeat(2);
+    G.bricks.push({
+      bx: W * 0.85, by: Math.max(170, H * 0.3), hx: W * 0.85, hy: Math.max(170, H * 0.3),
+      row: -6, col: 9, w: 40, h: 52, hp: 3, maxHp: 3,
+      bare: true, barrier: true, lucPrison: true,
+      poke: { id: 0, t: 'fairy', n: 'THE PRISON' },
+      flash: 0, wobble: 0.7,
+    });
+    setCombatNotice((F.profile && F.profile.beats[2] && F.profile.beats[2].tip) || 'SHATTER THE PRISON', '#ff9ecb', 2.4);
+  }
+  // WING-SHAPED SHADOW SECTORS: cast toward the player, closing on a clock.
+  // Caught at the close: Surge drains and the shadow FEEDS (clamped at the
+  // phase's entry line — progress is never stolen back). Freed = no more.
+  if (G.mode === 'classic' || HT.freed) return;
+  if (HT.sector) {
+    const S = HT.sector;
+    S.t += dt;
+    if (S.t >= S.dur) {
+      HT.sector = null;
+      const px = G.paddle.x, py = shipY();
+      const ang = Math.atan2(py - S.cy, px - S.cx);
+      const d2 = Math.hypot(px - S.cx, py - S.cy);
+      let dd = ang - S.ang;
+      while (dd > Math.PI) dd -= Math.PI * 2;
+      while (dd < -Math.PI) dd += Math.PI * 2;
+      if (Math.abs(dd) < S.spread && d2 <= S.rad + 30) {
+        HT.sectorHits++;
+        F.mastery.counters.sectorHits = HT.sectorHits;
+        G.mega = Math.max(0, G.mega - 0.25);
+        const cap = boss.maxHp * (bossLastStand(boss) ? 0.5 : 1);
+        boss.hp = Math.min(cap, boss.hp + boss.maxHp * 0.04);
+        setCombatNotice(huntWord('sectorWord', 'THE SHADOW DRINKS'), '#b388ff', 1.8);
+        burst(px, py, '#b388ff', 22, 300, 0.6);
+        SFX.hit(0);
+      }
+    }
+  } else {
+    HT.sectorCD -= dt;
+    if (HT.sectorCD <= 0) {
+      HT.sectorCD = bossLastStand(boss) ? 6.5 : 8;
+      HT.sectors++;
+      const cx2 = boss.bx + G.fx, cy2 = boss.by + G.fy;
+      HT.sector = {
+        cx: cx2, cy: cy2, t: 0, dur: 2.2,
+        ang: Math.atan2(shipY() - cy2, G.paddle.x - cx2),
+        spread: 0.45, rad: Math.hypot(shipY() - cy2, G.paddle.x - cx2) + 60,
+      };
+    }
+  }
+}
+// ---- TRIAL OF THE LIVE GRID (AFT-020 Phase 5, realm 5) ----
+function circuitState() { return (G.finale && G.finale.format === 'circuit' && G.finale.circuit) || null; }
+function circuitWord(k, fallback) {
+  const F = G.finale;
+  return (F && F.profile && F.profile.circuit && F.profile.circuit[k]) || fallback;
+}
+// the FIRST Paladin struck becomes the duel; the others stand down into
+// neutral terminals (excluded from fire, clear, and the hostile systems)
+function circuitChooseDuel(br) {
+  const F = G.finale, C = F.circuit;
+  C.chosen = br.subIdx || 0;
+  C.grammar = C.chosen; // 0 fast · 1 heavy · 2 growing — all sidegrades
+  br.paladinDuel = true;
+  br.hp = br.maxHp = Math.max(3, Math.round((G.gauntlet ? G.gauntlet.legendHp : 20) * 0.3));
+  F.meter = { value: 0, max: 1, label: (br.poke.n || 'THE DUEL').toUpperCase() };
+  for (const b of G.bricks) {
+    if (!b.paladin || b === br || b.dead) continue;
+    b.subBoss = false; b.gridTerminal = true;
+    b.hp = b.maxHp = 999;
+    b.openT = 0;
+  }
+  setCombatNotice(circuitWord('duelWord', 'THE DUEL IS CHOSEN') + ' · '
+    + circuitWord('standWord', 'THE OTHERS STAND DOWN'), '#ffd166', 2.4);
+  ringFx(br.bx + G.fx, br.by + G.fy, '#ffd166', 8, 120, 4, 0.5);
+  SFX.roar();
+}
+function circuitArm() {
+  const F = G.finale, C = F.circuit;
+  const boss = G.bricks.find(b => b.isBoss && !b.dead && !b.mythic);
+  const terms = G.bricks.filter(b => b.gridTerminal && !b.dead);
+  if (!boss || !terms.length) return;
+  // deterministic terminal pick: alternate; the LATER grid includes the
+  // player's position as the final node — bait and move
+  C.armN = (C.armN || 0) + 1;
+  const term = terms[C.armN % terms.length];
+  const late = bossLastStand(boss);
+  const grammarIllum = ([1.4, 2.2, 1.7][C.grammar] || 1.7) * spiralTellMul();
+  C.active = {
+    t: 0, illum: grammarIllum, fired: false, hits: 0, need: 3,
+    from: { x: boss.bx + G.fx, y: boss.by + G.fy },
+    node: term,
+    endX: late ? G.paddle.x : term.bx + G.fx, // late circuits hunt where you STOOD
+    w: C.grammar === 1 ? 130 : 90,
+  };
+  setCombatNotice(circuitWord('tipWord', 'THE ROUTE LIGHTS — BREAK THE CHARGED TERMINAL'), '#ffd166', 1.4);
+}
+function circuitRedirect() {
+  const F = G.finale, C = F.circuit;
+  const boss = G.bricks.find(b => b.isBoss && !b.dead && !b.mythic);
+  C.active = null;
+  C.redirects++;
+  C.relit++;
+  F.mastery.counters.redirects = C.redirects;
+  F.mastery.countered = true;
+  if (boss) {
+    // the jolt turns home: a scripted 6% proc under its own boss coefficient
+    damageBrick(boss, Math.max(1, boss.maxHp * 0.06), boss.bx + G.fx, boss.by + G.fy, null,
+      { source: 'other', noMega: true });
+    boss.flash = 1;
+    ringFx(boss.bx + G.fx, boss.by + G.fy, '#ffd166', 10, 150, 5, 0.6);
+  }
+  setCombatNotice(circuitWord('redirectWord', 'REDIRECTED!') + ' · '
+    + circuitWord('relitWord', 'A DISTRICT RELIGHTS'), '#9CFF57', 1.8);
+  SFX.mega();
+}
+function circuitBeginCoda(gen2) {
+  const F = G.finale;
+  const mid = gen2.gauntlet && gen2.gauntlet.myth;
+  F.coda = { t: 0, dur: 16, passes: 0 };
+  F.codaHold = true;
+  if (mid) {
+    const vw2 = Math.min(110, W * 0.15);
+    const flame = {
+      bx: -vw2, by: Math.max(170, H * 0.3), hx: -vw2, hy: Math.max(170, H * 0.3),
+      row: -3, col: 0, w: vw2, h: vw2 * 0.9, hp: 1, maxHp: 1,
+      bare: true, victoryFlame: true, poke: { id: mid[0], t: mid[1], n: SKIN.names[mid[0]] },
+      crosser: { vx: Math.max(120, W / 6), bobPh: 0 }, flash: 0, wobble: 0,
+    };
+    G.bricks.push(flame);
+    getSprite(mid[0]);
+    beginBossReveal('mythic', [flame]);
+  }
+  const label = (F.profile && F.profile.beats[2] && F.profile.beats[2].label) || 'THE VICTORY FLAME';
+  const tip = (F.profile && F.profile.beats[2] && F.profile.beats[2].tip) || 'RIDE THE WAKE';
+  setAnnounce('fire', '#ffd166', label, tip, 3.2, null, null, false, true, 'boss');
+  F.meter = { value: 0, max: 5, label: circuitWord('flameWord', 'RIDE THE WAKE') };
+}
+function updateCircuit(dt) {
+  const F = G.finale, C = F.circuit;
+  if (F.beat === 2 && F.coda) {
+    F.coda.t += dt;
+    // the flame sweeps back and forth; riding its wake pays score + mastery
+    const flame = G.bricks.find(b => b.victoryFlame && !b.dead);
+    if (flame) {
+      // relaunch the crosser for three total passes
+      if (flame.crosser && ((flame.crosser.vx > 0 && flame.bx > W + flame.w) || (flame.crosser.vx < 0 && flame.bx < -flame.w))) {
+        F.coda.passes++;
+        if (F.coda.passes < 3) {
+          flame.crosser.vx *= -1;
+          flame.bx = flame.crosser.vx > 0 ? -flame.w : W + flame.w;
+          flame.dead = false;
+        }
+      }
+      if (Math.abs(G.paddle.x - (flame.bx + G.fx)) < Math.max(120, W * 0.14)) {
+        C.flameT += dt;
+        F.mastery.counters.flameT = +C.flameT.toFixed(1);
+        if (F.meter) F.meter.value = Math.min(5, C.flameT);
+        if ((C.scoreCD || 0) <= 0) {
+          C.scoreCD = 0.5;
+          G.score += Math.round(60 * scoreMult());
+          addFloater(G.paddle.x, shipY() - 40, '+60 GLORY', '#ffd166', 11);
+        }
+      }
+      if (C.scoreCD > 0) C.scoreCD -= dt;
+    }
+    if ((F.coda.passes >= 3 || F.coda.t >= F.coda.dur) && F.codaHold) {
+      F.codaHold = false;
+      if (C.flameT >= 5 && !F.wish) F.wish = 'commit'; // glory leans the draft
+    }
+    return;
+  }
+  if (F.beat !== 1) return;
+  const boss = G.bricks.find(b => b.isBoss && !b.dead && !b.mythic);
+  if (!boss) return;
+  if (!C.active) {
+    C.armT -= dt;
+    if (C.armT <= 0) {
+      C.armT = [7, 11, 9][C.grammar] || 9;
+      circuitArm();
+    }
+    return;
+  }
+  const A = C.active;
+  A.t += dt;
+  if (A.node && A.node.dead) { C.active = null; return; } // its terminal fell — the route dies
+  if (!A.fired && A.t >= A.illum) {
+    A.fired = true;
+    // the electricity moves: ONE warned lane at the illuminated endpoint —
+    // never in classic (the calm contract clears lane strikes there anyway)
+    if (G.mode !== 'classic') {
+      G.columnStrikes.push({ x: Math.max(50, Math.min(W - 50, A.endX)), w: A.w, warn: 0.9, strike: 0.45, color: '#ffd166' });
+    }
+    // the VERDANT grammar grows: a second, narrower echo lane late
+    if (C.grammar === 2 && bossLastStand(boss) && G.mode !== 'classic') {
+      G.columnStrikes.push({ x: Math.max(50, Math.min(W - 50, W - A.endX)), w: 60, warn: 1.3, strike: 0.4, color: '#ffd166' });
+    }
+    C.active = null;
+  }
+}
+// ---- THE FRACTURED HOUR (AFT-020 Phase 5, realm 4) ----
+function hourglassState() { return (G.finale && G.finale.format === 'hourglass' && G.finale.hourglass) || null; }
+function hourglassWord(k, fallback) {
+  const F = G.finale;
+  return (F && F.profile && F.profile.hourglass && F.profile.hourglass[k]) || fallback;
+}
+function sibylAwakens(br) {
+  const F = G.finale, HG = F.hourglass;
+  br.subBoss = false;
+  br.sibylAwake = true;
+  br.friendly = true; br.fhp = 3; br.fpath = 'hold';
+  br.hp = br.maxHp = 999;
+  br.openT = 0; br.flash = 1;
+  br.fbx0 = br.bx; br.f0y = br.by;
+  br.slotX = W * (0.22 + 0.28 * (br.subIdx || 0)); // its forge-line station
+  br.slotY = Math.max(130, H * 0.2);
+  HG.awakened++;
+  F.mastery.counters.sibyls = HG.awakened;
+  F.mastery.countered = true;
+  if (F.meter) F.meter.value = HG.awakened;
+  // the FIRST woken Sibyl leans the Victory Draft by its own discipline —
+  // anvil/piston/furnace → commit/adapt/explore. Selection control only.
+  if (!F.wish) F.wish = ['commit', 'adapt', 'explore'][br.subIdx || 0];
+  setCombatNotice(hourglassWord('wakeWord', 'IT WAKES') + ' — IT RINGS FOR YOU', '#a5d6a7', 2.2);
+  ringFx(br.bx + G.fx, br.by + G.fy, '#a5d6a7', 8, 110, 4, 0.55);
+  sparkle(br.bx + G.fx, br.by + G.fy, 10, true);
+  SFX.mega();
+}
+// is any woken clock RINGING right now? (staggered 3s-on / 2s-off windows)
+function hourglassRinging() {
+  const F = G.finale;
+  if (!F || !F.hourglass) return false;
+  let i = 0;
+  for (const b of G.bricks) {
+    if (b.dead || !b.sibylAwake) continue;
+    if (((F.beatT + i * 2.5) % 5) < 3) return true;
+    i++;
+  }
+  return false;
+}
+function hourglassInvade() {
+  const F = G.finale, HG = F.hourglass;
+  if (HG.invaded) return;
+  HG.invaded = true;
+  if (G.gauntlet) G.gauntlet.phase = 2;
+  startFinaleBeat(2);
+  const gen2 = genFor(G.level);
+  const mid = gen2.gauntlet && gen2.gauntlet.myth;
+  const regent = G.bricks.find(b => b.isBoss && !b.dead && !b.mythic && !b.secretBoss);
+  if (regent) regent.hourActor = 'regent';
+  if (mid) {
+    const mw = Math.min(150, Math.max(96, W * 0.16)), mh2 = mw * 0.92;
+    const noct = {
+      bx: W * 0.75, by: Math.max(150, H * 0.24), hx: W * 0.75, hy: Math.max(150, H * 0.24),
+      row: -1, col: 1, w: mw, h: mh2,
+      hp: Math.max(6, Math.round(G.gauntlet.legendHp * 0.45)),
+      maxHp: Math.max(6, Math.round(G.gauntlet.legendHp * 0.45)),
+      phase: 1, phaseCount: 1, isBoss: true, mythic: true, hourActor: 'noct',
+      poke: { id: mid[0], t: mid[1], n: SKIN.names[mid[0]] },
+      flash: 0, wobble: 2.2,
+      abilityCD: (SKIN.mythicAbilities[mid[0]]?.cd || 5) * 0.8,
+    };
+    G.bricks.push(noct);
+    getSprite(mid[0]);
+    beginBossReveal('mythic', [noct]);
+  }
+  // the thief takes the first hour — the Regent phases OUT
+  HG.hour = 'still'; HG.hourT = 0;
+  setAnnounce('alert', '#b388ff',
+    (F.profile && F.profile.beats[2] && F.profile.beats[2].label) || 'THE STOLEN HOUR',
+    (F.profile && F.profile.beats[2] && F.profile.beats[2].tip) || '', 3,
+    null, null, false, true, 'boss');
+  G.shake = 10; SFX.roar();
+}
+function updateHourglass(dt) {
+  const F = G.finale, HG = F.hourglass;
+  if (HG.silentCD > 0) HG.silentCD -= dt;
+  if (HG.outCD > 0) HG.outCD -= dt;
+  // awakened clocks glide to their forge-line stations
+  for (const b of G.bricks) {
+    if (b.dead || !b.sibylAwake || b.slotX == null) continue;
+    b.fbx0 += (b.slotX - b.fbx0) * Math.min(1, dt * 1.6);
+    b.f0y += (b.slotY - b.f0y) * Math.min(1, dt * 1.6);
+  }
+  const regent = G.bricks.find(b => b.hourActor === 'regent' && !b.dead)
+    || G.bricks.find(b => b.isBoss && !b.dead && !b.mythic && !b.secretBoss);
+  // the midpoint theft: the Regent's second phase invites the invader
+  if (F.beat === 1 && regent && (regent.phase || 1) >= 2) hourglassInvade();
+  // the REPLAY queue: recorded volleys echo back pale and slower
+  for (let i = HG.replayQ.length - 1; i >= 0; i--) {
+    const r = HG.replayQ[i];
+    if (F.beatT < r.due) continue;
+    HG.replayQ.splice(i, 1);
+    if (G.mode === 'classic') continue; // the calm contract
+    const base = Math.atan2(shipY() - r.y, G.paddle.x - r.x);
+    const sp = 150 * diff().shotSpeed;
+    const vid = nextEnemyVolley();
+    for (let k = -1; k <= 1; k++) {
+      const a = base + k * 0.22;
+      spawnEnemyShot({ x: r.x, y: r.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        boss: true, replay: true, type: r.type, species: r.species,
+        kind: r.kind, classKey: 'micro', volleyId: vid });
+    }
+    if (HG.outCD <= 0) {
+      HG.outCD = 1.4;
+      setCombatNotice(hourglassWord('replayWord', 'THE HOUR REPEATS'), '#b0bec5', 1.2);
+    }
+  }
+  if (F.beat === 2 && HG.invaded) {
+    const noct = G.bricks.find(b => b.hourActor === 'noct' && !b.dead);
+    if (regent && noct) {
+      HG.hourT += dt;
+      if (HG.hourT >= HG.hourEvery * spiralTellMul()) {
+        HG.hourT = 0;
+        HG.hour = HG.hour === 'forge' ? 'still' : 'forge';
+        setCombatNotice(HG.hour === 'forge'
+          ? hourglassWord('forgeWord', 'FORGE HOUR')
+          : hourglassWord('stillWord', 'STILL HOUR'),
+        HG.hour === 'forge' ? '#ffab6b' : '#b388ff', 1.6);
+      }
+      regent.hourOut = HG.hour === 'still';
+      noct.hourOut = HG.hour === 'forge';
+    } else {
+      // one actor has fallen — the survivor holds every hour
+      for (const b of G.bricks) if (b.hourActor && !b.dead) b.hourOut = false;
+    }
+  }
+}
+// ---- SIEGE OF THE DEEP CURRENT (AFT-020 Phase 4) ----
+function siegeState() { return (G.finale && G.finale.format === 'siege' && G.finale.siege) || null; }
+function siegeColossusDown(br) {
+  const F = G.finale, S = F.siege;
+  const idx = br.subIdx || 0;
+  if (S.broken.includes(idx)) return;
+  S.broken.push(idx);
+  F.mastery.counters.stations = S.broken.length;
+  if (F.meter) F.meter.value = S.broken.length;
+  // each station strengthens ONE property of the coming weather — the
+  // ORDER is the player's play-style choice, never a hidden right answer
+  const prop = ['quicken', 'widen', 'arm'][idx] || 'quicken';
+  S.weather[prop]++;
+  const words = (F.profile && F.profile.siege && F.profile.siege.weatherWords) || [];
+  setCombatNotice(words[idx] || 'THE WEATHER SHIFTS', '#5ad7d2', 2);
+  if (S.broken.length >= 3) {
+    // THE SEAL FALLS — the round controller's no-subBoss check calls
+    // gauntletWake right after this kill resolves; the calm between beats
+    // arrives there
+    F.mastery.countered = true; // the station order was the signature answer
+  }
+}
+function siegeBeginCoda(gen2) {
+  const F = G.finale;
+  const fp = F.profile;
+  const mid = gen2.gauntlet && gen2.gauntlet.myth;
+  F.coda = { t: 0, dur: 12, spawned: 0, wishes: 3 };
+  F.codaHold = true;
+  if (mid) {
+    const vw2 = Math.min(110, W * 0.15);
+    const star = {
+      bx: -vw2, by: Math.max(140, H * 0.22), hx: -vw2, hy: Math.max(140, H * 0.22),
+      row: -3, col: 0, w: vw2, h: vw2 * 0.9, hp: 1, maxHp: 1,
+      bare: true, poke: { id: mid[0], t: mid[1], n: SKIN.names[mid[0]] },
+      crosser: { vx: Math.max(44, W / 14), bobPh: 0 }, flash: 0, wobble: 0,
+    };
+    G.bricks.push(star);
+    getSprite(mid[0]);
+    beginBossReveal('mythic', [star]);
+  }
+  const label = (fp && fp.beats[2] && fp.beats[2].label) || 'THREE WISHES';
+  const tip = (fp && fp.beats[2] && fp.beats[2].tip) || 'CATCH ONE';
+  setAnnounce('star', '#ffd54f', label, tip, 3.4, null, null, false, true, 'boss');
+  F.meter = null; // three falling stars need no meter — the sky is the read
+}
+function updateSiegeCoda(dt) {
+  const F = G.finale, C = F.coda;
+  if (!C) return;
+  C.t += dt;
+  const names = (F.profile && F.profile.siege && F.profile.siege.wishNames) || ['COMMIT', 'ADAPT', 'EXPLORE'];
+  const due = Math.min(C.wishes, Math.floor(C.t / 1.6) + 1);
+  while (C.spawned < due) {
+    const i = C.spawned++;
+    G.powerups.push({
+      x: W * (0.3 + 0.2 * i), y: -18, vy: 58,
+      p: { key: 'wish', name: names[i] + ' WISH', wishIdx: i },
+      rot: 0, hint: true,
+    });
+  }
+  if (C.t >= C.dur && C.spawned >= C.wishes) F.codaHold = false;
+}
+function updateSiege(dt) {
+  const F = G.finale, S = F.siege;
+  if (S.sealCD > 0) S.sealCD -= dt;
+  if (S.hitCD > 0) S.hitCD -= dt;
+  if (F.beat === 2) { updateSiegeCoda(dt); return; }
+  const sov = G.bricks.find(b => b.siegeSov && !b.dead);
+  if (!sov) return;
+  if (F.beat === 1) {
+    // THE CURRENT TRAIL: the body's path becomes the hazard. Records every
+    // 0.22s; safety ALTERNATES (burns ↔ safe) on a readable clock; the
+    // first taughtT seconds are a harmless shimmer with the rule named.
+    S.trailT += dt;
+    if (S.trailT >= 0.22) {
+      S.trailT = 0;
+      S.trail.push({ x: sov.bx + G.fx, y: sov.by + G.fy, t: 0 });
+      if (S.trail.length > 26) S.trail.shift();
+    }
+    for (const p2 of S.trail) p2.t += dt;
+    if (S.taughtT > 0) {
+      S.taughtT -= dt;
+      if (S.taughtT <= 0) setCombatNotice(
+        (F.profile && F.profile.siege && F.profile.siege.trailWord) || 'THE TRAIL BURNS', '#ff8a80', 2);
+    } else {
+      S.flipT += dt;
+      const flipEvery = S.flipEvery * (bossLastStand(sov) ? 0.72 : 1) * spiralTellMul(); // remix + spiral: faster turns
+      if (S.flipT >= flipEvery) {
+        S.flipT = 0;
+        S.burns = !S.burns;
+        setCombatNotice(S.burns
+          ? ((F.profile && F.profile.siege && F.profile.siege.trailWord) || 'THE TRAIL BURNS')
+          : 'THE CURRENT CALMS — THE OPEN WATER STIRS', S.burns ? '#ff8a80' : '#80d8ff', 1.6);
+      }
+      // contact: one life, standard grace — never in classic (the calm
+      // contract: there the current only drags the BALL, in the ball loop)
+      if (S.burns && G.mode !== 'classic' && G.invuln <= 0 && S.hitCD <= 0) {
+        const px = G.paddle.x, py = shipY();
+        const rr2 = (S.trailR + S.weather.widen * 9);
+        for (const p2 of S.trail) {
+          if (p2.t < 0.35) continue; // the newest links shimmer in first — honest
+          const dx2 = px - p2.x, dy2 = py - p2.y;
+          if (dx2 * dx2 + dy2 * dy2 < rr2 * rr2) {
+            S.hitCD = 1.4;
+            // AEGIS answers environmental danger too — never regress the
+            // "a shield absorbs a lethal hit in every mode" contract
+            if (!absorbHit(px, py)) {
+              F.mastery.counters.trailHits = (F.mastery.counters.trailHits || 0) + 1;
+              loseLife((F.profile && F.profile.siege && F.profile.siege.trailWord) || 'THE CURRENT TRAIL');
+            }
+            break;
+          }
+        }
+      }
+      // ARMED DEEP (hull station survived to power it): the newest trail
+      // link drips one straight bubble micro every 3s — budgeted fire
+      if (S.weather.arm > 0 && G.mode !== 'classic') {
+        S.armT += dt;
+        if (S.armT >= 3 && S.trail.length) {
+          S.armT = 0;
+          const p2 = S.trail[S.trail.length - 1];
+          spawnEnemyShot({ x: p2.x, y: p2.y, vx: 0, vy: 150, boss: true,
+            type: sov.poke.t, species: sov.poke.id, kind: 'aqua', classKey: 'micro',
+            volleyId: nextEnemyVolley() });
+        }
+      }
+    }
+  }
+}
 function gauntletWake() {
   const gj = G.gauntlet;
   if (!gj) return;
   gj.phase = 1;
+  startFinaleBeat(1);
+  // SIEGE: the Sovereign was never parked — the seal FALLING is the wake.
+  // Its wings still join here; the between-beats calm clears the lanes.
+  if (G.finale && G.finale.format === 'siege') {
+    const F = G.finale;
+    for (const b of G.bricks) if (b.dormant) b.dormant = false; // wings join the weather
+    for (const s of G.enemyShots) if (!s.boss) s.dead = true;
+    G.heat = Math.max(0, G.heat - 0.5);
+    G.enemyShotCD = Math.max(G.enemyShotCD, 2.2);
+    F.meter = null; // the weather beat reads from the HUD dock + the trail
+    const tip = (F.profile && F.profile.beats[1] && F.profile.beats[1].tip) || '';
+    setAnnounce('alert', '#5ad7d2',
+      (F.profile && F.profile.beats[1] && F.profile.beats[1].label) || 'THE SEAL FALLS',
+      tip, 3, null, null, false, true, 'boss');
+    G.shake = 10; SFX.roar();
+    return;
+  }
   let legend = null;
   for (const b of G.bricks) {
     if (!b.dormant) continue;
@@ -3081,7 +4725,41 @@ function gauntletSummonMythic(forceSecret = false) {
   const gj = G.gauntlet;
   if (!gj) return;
   gj.phase = 2;
+  startFinaleBeat(2); // covers both the mythic and the secret replacement
   const gen2 = genFor(G.level);
+  // THE GALE RELAY's coda is a REWARD EVENT, not another health bar — the
+  // storm rewinds into blooms and the Hourseed drifts through, unfought.
+  if (G.finale && G.finale.format === 'relay') {
+    relayBeginCoda(gen2);
+    return;
+  }
+  // the SIEGE's coda: three falling wishes shape the Victory Draft
+  if (G.finale && G.finale.format === 'siege') {
+    siegeBeginCoda(gen2);
+    return;
+  }
+  // the LIVE GRID's coda: a ridden Victory Flame, never a fight
+  if (G.finale && G.finale.format === 'circuit') {
+    circuitBeginCoda(gen2);
+    return;
+  }
+  // the HUNT has no third round at all — the rescue happened (or was
+  // missed) INSIDE the shadow fight; the fall of the Sovereign is the end
+  if (G.finale && G.finale.format === 'hunt') return;
+  // the RITE's saboteur lives INSIDE the Sovereign fight — no round 3
+  if (G.finale && G.finale.format === 'rite') return;
+  // the CHASE: a Sovereign felled before the linkage still summons the
+  // puppeteer — alone, chainless, already exposed
+  if (G.finale && G.finale.format === 'chase') {
+    const C4 = G.finale.chase;
+    if (!C4.linked) {
+      const liveBoss = G.bricks.find(b => b.isBoss && !b.dead && !b.mythic);
+      chaseLink(liveBoss || null);
+      const mar2 = G.bricks.find(b => b.chaseLinked && b.mythic && !b.dead);
+      if (mar2) { C4.exposed = true; mar2.prismMark = true; }
+    }
+    return;
+  }
   const riftOpen = forceSecret || (secretEligible() && secretShardCount() === 3);
   if (riftOpen) {
     const vw = Math.min(300, Math.max(170, W * 0.38));
@@ -3114,7 +4792,11 @@ function gauntletSummonMythic(forceSecret = false) {
   // The final round used to be only 60% of the legendary and often vanished
   // to one charged splash. STARFIGHTER's three authored mythical phases need
   // enough runway to teach, transform and remix their signature pattern.
-  const mHp = Math.max(6, Math.round(gj.legendHp * (G.mode === 'junkie' ? 0.82 : 0.6)));
+  // the realm-1 coda is a SHORT mastery mirror — roughly 40% of the
+  // Sovereign's combat time, per the plan's 35–45% bracket
+  const codaTrim = !!(G.finale && G.finale.format === 'ladder' && G.finale.realm === 0);
+  const mHp = Math.max(6, Math.round(gj.legendHp
+    * (G.mode === 'junkie' ? (codaTrim ? 0.5 : 0.82) : (codaTrim ? 0.45 : 0.6))));
   G.bricks.push({
     bx: W / 2, by: 150, hx: W / 2, hy: 150, row: -1, col: -1,
     w: Math.min(G.brickW * 1.6, W * 0.3), h: G.brickH * 1.4,
@@ -3341,6 +5023,28 @@ function update(dt) {
 
   tickEffects(dt);
   if (G.state === 'play') { G.playT += dt; statsPlayTick(dt); }
+  // AFT-008 clock classifier: one cheap pass per frame — does a damageable
+  // target or live objective exist (MEANINGFUL PROGRESS), and is hostile
+  // threat live (ACTIVE THREAT)? Reveals freeze combat, so neither clock
+  // runs under one. Classic takes no enemy fire — its "active threat" is a
+  // live ball to keep. Phase-gated / dormant targets don't count as progress.
+  // one cached list serves every friendly rule (traveler + woken Sibyls)
+  G.friendlyList = G.bricks.some(b => b.friendly && !b.dead)
+    ? G.bricks.filter(b => b.friendly && !b.dead) : null;
+  if (G.state === 'play' && !G.reveal && G.runStats && G.runStats.cur) {
+    let dmgable = false, hostileAlive = false;
+    for (const b of G.bricks) {
+      if (b.dead || b.barrier || b.crosser || b.friendly || b.dormant) continue;
+      hostileAlive = true;
+      if (!(b.phaseT > 0)) { dmgable = true; break; }
+    }
+    const prog = dmgable || !!(G.objective && !G.objective.done && !G.objective.failed);
+    const active = G.mode === 'classic'
+      ? G.balls.length > 0
+      : (hostileAlive || G.enemyShots.length > 0);
+    G.threatActive = active; // §9.6: survival clocks advance on THREAT time
+    statsClockTick(dt, prog, active);
+  } else G.threatActive = false;
   // ---- shooter modes (BLASTER / SPACE JUNKIE): hold FIRE to build a heavy
   // shot, release to fire. While a hold is pending or charging, normal fire
   // pauses so no stray bolt leaks out before the charged shot.
@@ -3384,16 +5088,22 @@ function update(dt) {
   else if (autoFiring && !charging && !chargedThisFrame && !touchChargeIntent && G.state === 'play') fireAction(true);
   // SUPER SHIELD capstone: a floor-shield charge regrows on a timer.
   // IMMORTAL REACTOR's counterburst stalls regrowth briefly (its limiter).
-  if (G.state === 'play' && upgN('aegisX') && G.regenLockT <= 0) {
+  // AFT-008 §9.7: the capstone regen counts ACTIVE-THREAT seconds only and
+  // regrows at most three charges per stage — reveal freezes, route choices
+  // and cleared boards no longer manufacture shields
+  if (G.state === 'play' && upgN('aegisX') && G.regenLockT <= 0
+    && G.threatActive && (G.shieldRegenN || 0) < 3) {
     if (G.shieldCharges < shieldCap()) {
       G.shieldRegenT -= dt;
       if (G.shieldRegenT <= 0) {
         G.shieldRegenT = 10;
+        G.shieldRegenN = (G.shieldRegenN || 0) + 1;
         G.shieldCharges++;
         SFX.shield();
         // capstone proc reads on the SHIP, not just as text: the bubble
         // flares green and a ring blooms outward as the charge regrows
         G.shieldFlash = Math.max(G.shieldFlash || 0, 0.8);
+        statsShieldGain('regen');
         ringFx(G.paddle.x, shipY(), '#66bb6a', 6, 52, 3, 0.4);
         addFloater(G.paddle.x, shipY() - 30, 'SUPER SHIELD +1', '#66bb6a', 12);
       }
@@ -3701,7 +5411,12 @@ function update(dt) {
   // ---- THE GAUNTLET: three rounds per finale. Round 1 the sentinels hold
   // the arena; felling them wakes the LEGENDARY (and its wings); felling
   // the legendary summons the MYTHICAL — smaller, faster, wilder.
-  if (G.gauntlet && G.state === 'play') {
+  // the finale beat clock excludes reveal freezes — beat time is combat time
+  if (G.finale && G.state === 'play' && !G.reveal) G.finale.beatT += dt;
+  updateFinaleDirector(dt);
+  // the RAID owns its own progression — the round controller's dead-actor
+  // checks would misread a format with no rounds at all
+  if (G.gauntlet && G.state === 'play' && !(G.finale && G.finale.format === 'raid')) {
     const gj = G.gauntlet;
     if (gj.phase === 0 && !G.bricks.some(b => !b.dead && b.subBoss)) {
       gauntletWake();
@@ -4236,7 +5951,23 @@ function update(dt) {
     th.x = b.x; th.y = b.y;
     b.trail.unshift(th);
     if (b.trail.length > tl) b.trail.length = tl;
-    if (windy) b.vx += Math.sin(G.time * 1.6 + b.y * 0.012) * (G.gustT > 0 ? 320 : 230) * dt;
+    {
+      // THE GALE RELAY in classic: the whole sky is windy EXCEPT the calm
+      // corridor over the carrier — the same rule the shooter modes read
+      const rl = relayLane();
+      const laneCalm = rl && Math.abs(b.x - rl.x) < rl.w / 2;
+      if ((windy || rl) && !laneCalm) b.vx += Math.sin(G.time * 1.6 + b.y * 0.012) * (G.gustT > 0 ? 320 : 230) * dt;
+      // the SIEGE in classic: the calm contract holds — the burning current
+      // never touches the paddle, it DRAGS the ball instead
+      const S = siegeState();
+      if (S && G.finale.beat === 1 && S.burns && S.taughtT <= 0) {
+        const rr2 = S.trailR + S.weather.widen * 9;
+        for (const p2 of S.trail) {
+          const dx2 = b.x - p2.x, dy2 = b.y - p2.y;
+          if (dx2 * dx2 + dy2 * dy2 < rr2 * rr2) { b.vx *= 0.988; b.vy *= 0.988; break; }
+        }
+      }
+    }
     // endgame aim-assist: gently steer rising balls toward the last few bricks
     if (aliveCnt > 0 && aliveCnt <= 4 && b.vy < 0) {
       const tgt = nearestBrick(b.x, b.y);
@@ -4270,7 +6001,7 @@ function update(dt) {
       // reaching the very top is a skill beat — reward it (points + a little Mega)
       if (G.state === 'play' && !b.stuck) {
         G.score += Math.round(12 * scoreMult());
-        if (G.megaT <= 0) G.mega = Math.min(1, G.mega + 0.0015);
+        if (G.megaT <= 0) gainMega(0.0015, 'rally');
         burst(b.x, 56 + b.r, '#ffd54f', 3, 90, 0.3);
       }
     }
@@ -4297,7 +6028,7 @@ function update(dt) {
             const bo = Math.round(150 * scoreMult());
             G.score += bo;
             addFloater(b.x, b.y + 20, 'HIGH GROUND! +' + bo, '#ffd54f', 17);
-            if (G.megaT <= 0) G.mega = Math.min(1, G.mega + 0.03);
+            if (G.megaT <= 0) gainMega(0.03, 'rally');
             tone(880, 0.14, 'triangle', 0.06, 200);
           }
         }
@@ -4348,7 +6079,7 @@ function update(dt) {
         burst(b.x, py, '#90caf9', 6, 120, 0.3);
         // a clean return vents blaster heat and (with Momentum) charges Mega
         if (G.overheat <= 0) G.heat = Math.max(0, G.heat - 0.5);
-        if (G.megaT <= 0) G.mega = Math.min(1, G.mega + 0.02 * upgN('momentum'));
+        if (G.megaT <= 0) gainMega(0.02 * upgN('momentum'), 'momentum');
         // CALIBRATED BARRAGE (classic): every 4th clean return primes the ball
         if (G.mode === 'classic' && upgN('calibrated') && ++G.calibReturns >= 4) {
           G.calibReturns = 0; G.calibShots = 1;
@@ -4364,6 +6095,7 @@ function update(dt) {
             G.torrentCount = 0;
             if (G.shieldCharges < shieldCap()) {
               G.shieldCharges++;
+              statsShieldGain('torrent');
               addFloater(G.paddle.x, py - 34, 'TORRENT SHIELD!', '#4dd0e1', 13);
               SFX.shield();
             }
@@ -4483,6 +6215,12 @@ function update(dt) {
     // TAILWIND CURRENT (Lugia): the pilot's bolts drift downwind in shooter
     // modes — aim upwind to hit. Accumulates a lateral vx, integrated below.
     if (G.mode !== 'classic' && G.gustT > 0 && G.gustDir) L.vx = (L.vx || 0) + G.gustDir * 150 * dt;
+    // THE GALE RELAY corridor: bolts fired OUTSIDE the wind lane drift with
+    // the gale; inside it they fly true — fight from the corridor
+    if (G.mode !== 'classic') {
+      const rl = relayLane();
+      if (rl && Math.abs(L.x - rl.x) > rl.w / 2) L.vx = (L.vx || 0) + rl.dir * 190 * dt;
+    }
     if (L.vx) L.x += L.vx * ts * dt;
     // bolts intercept enemy fire — shoot the shots down!
     // (Interceptor upgrade lets one bolt take out several shots)
@@ -4493,7 +6231,10 @@ function update(dt) {
         const interceptDmg = L.charged ? 3 : 1;
         s.interceptHP = Math.max(0, (s.interceptHP || 1) - interceptDmg);
         const destroyed = s.interceptHP <= 0;
-        if (destroyed) { s.dead = true; statsIntercept(); }
+        if (destroyed) {
+          s.dead = true; statsIntercept();
+          if (s.orbit && s.boss) finaleAnchorDenied(); // realm-1 memory anchors
+        }
         L.hits = (L.hits || 0) + 1;
         if (L.hits > (L.charged ? 2 + upgN('intercept') : upgN('intercept'))) L.dead = true;
         // BULWARK BATTERY: every interception adds a wall segment (fusion)
@@ -4615,6 +6356,7 @@ function update(dt) {
         // PSYSTRIKE interrupt: a charged hit lands mid-channel — the
         if (L.charged && br.channel && !br.dead) {
           br.channel = null; br.channelCD = 9; br.staggerT = 1.5;
+          statsChannel('broken');
           br.flash = 1;
           br.fireQuietT = Math.max(br.fireQuietT || 0, 1.6);
           addFloater(bx, by - br.h / 2 - 16, 'CHANNEL BROKEN!', '#80d8ff', 16);
@@ -4625,7 +6367,7 @@ function update(dt) {
         }
         // MOMENTUM: in the shooter modes there are no paddle returns, so
         // blaster hits carry the whole tier — twice the classic trickle
-        if (L.basic && G.megaT <= 0 && upgN('momentum')) G.mega = Math.min(1, G.mega + (G.mode !== 'classic' ? 0.004 : 0.002));
+        if (L.basic && G.megaT <= 0 && upgN('momentum')) gainMega(G.mode !== 'classic' ? 0.004 : 0.002, 'momentum');
         // FUSION hit meters: only ORDINARY basic volleys line up — primed
         // lanes, echoes and reflections are excluded so no proc feeds itself
         if (L.basic && !L.charged && !L.prism && !L.echo && !L.facet) {
@@ -4808,8 +6550,11 @@ function update(dt) {
 
   // ---- enemy fire (telegraphed — a warning flashes before every shot) ----
   if (G.state === 'play' && G.bossIntro <= 0) {
-    const boss = G.bricks.find(b => b.isBoss && !b.dead && !b.dormant);
-    if (boss) {
+    // THE FRACTURED HOUR: the actor holding the PRESENT hour acts — an
+    // out-of-hour boss neither fires nor channels
+    const boss = G.bricks.find(b => b.isBoss && !b.dead && !b.dormant && !b.hourOut)
+      || G.bricks.find(b => b.isBoss && !b.dead && !b.dormant);
+    if (boss && !boss.hourOut) {
       // signature ability (teleport, winds, sweeps, time warp...)
       // across the roster): below hpFrac HP the desperation begins — a rooted
       // channel behind a loud warning. Uninterrupted, it fires a warned column
@@ -4825,6 +6570,7 @@ function update(dt) {
         if (!boss.channel && (boss.channelCD || 0) > 0) boss.channelCD -= dt * ts;
         if (!boss.channel && boss.hp / boss.maxHp <= chDef.hpFrac && (boss.channelCD || 0) <= 0 && !(boss.staggerT > 0)) {
           boss.channel = { t: 0, dur: chDef.dur, pattern: chDef.pattern, name: chDef.name };
+          statsChannel('open');
           boss.fireQuietT = Math.max(boss.fireQuietT || 0, 3.4);
           boss.teleportAt = null; // the channel roots him
           boss.phaseT = 0; // a desperation must never be uninterruptible (Lunala's
@@ -4869,6 +6615,19 @@ function update(dt) {
           boss.bx = boss.hx;
           boss.flash = 1;
           burst(boss.bx + G.fx, boss.by + G.fy, '#ec407a', 34, 340, 0.7);
+          // VELMORA REMEMBERS (the realm-1 core rule): each blink step
+          // records where the player STOOD; the first memory is a harmless
+          // teach, later ones echo back as delayed lane strikes
+          if (G.finale && G.finale.memory && boss.isBoss && !boss.mythic && !boss.secretBoss
+            && G.finale.beat === 1) {
+            const F2 = G.finale;
+            F2.memory.push({ x: G.paddle.x, t: 0, taught: F2.memory.length === 0 && !F2.memoryTaught });
+            if (!F2.memoryTaught) {
+              F2.memoryTaught = true;
+              setCombatNotice('IT REMEMBERS WHERE YOU STOOD', '#ec407a', 2.2);
+            }
+            if (F2.memory.length > 2) F2.memory.shift();
+          }
         }
       }
       // sweep motion (Rayquaza crossing / Koraidon charging)
@@ -4946,7 +6705,14 @@ function update(dt) {
       G.bossShotCD -= dt * ts;
       if (G.mode !== 'classic' && G.bossShotCD <= 0 && boss.fireQuietT <= 0) {
         const bossBase = G.mode === 'junkie' ? d.starBossShotInt : d.bossShotInt;
-        G.bossShotCD = bossBase * (bossLastStand(boss) ? 0.72 : boss.phase === 2 ? 0.84 : 1)
+        // RAID: generic Sovereign fire YIELDS while the crown mechanic runs
+        const raidYield = boss.raidSeraph && raidState() && !G.finale.raid.window ? 1.6 : 1;
+        // SIEGE: fire yields to the station work; each TIDE station that
+        // survived to power the weather quickens the final volleys
+        const siegeMul = boss.siegeSov && siegeState()
+          ? (G.finale.beat === 0 ? 1.5 : 1) * Math.pow(0.88, G.finale.siege.weather.quicken || 0)
+          : 1;
+        G.bossShotCD = raidYield * siegeMul * bossBase * (bossLastStand(boss) ? 0.72 : boss.phase === 2 ? 0.84 : 1)
           * (boss.secretBoss ? 0.92 : boss.mythic ? 0.82 : 1)
           // BASTION cadence: a boss kit may tighten its volley once phase 2
         const warn = G.mode === 'junkie' ? 0.72 : 0.55;
@@ -4964,7 +6730,10 @@ function update(dt) {
           : d.enemyShotInt * (0.7 + gameRand() * 0.6) * (blaster ? 0.5 : 1);
         // off-screen flyers (wrapping patterns / streams) can't fire
         const alive = G.bricks.filter(b => !b.dead && !b.isBoss && !b.subBoss && !b.entry && !b.dive
-          && !b.barrier && !b.dormant && !b.crosser && !b.friendly && b.bx + G.fx > 30 && b.bx + G.fx < W - 30
+          && !b.barrier && !b.dormant && !b.crosser && !b.friendly
+          && !b.raidVine && !(b.raidBound && !b.raidFreed) // bound actors and props never fire
+          && !b.gridTerminal && !b.umbrix // stood-down Paladins / the thief are outside the pool
+          && b.bx + G.fx > 30 && b.bx + G.fx < W - 30
           && !(G.encounter && b.flight && b.flight.sq != null && G.encounter.squads[b.flight.sq]
             && G.encounter.squads[b.flight.sq].silenceT > 0));
         // cap concurrent warnings so the board never fills with warning lines
@@ -4997,6 +6766,16 @@ function update(dt) {
       const bx = tg.br.bx + G.fx, by = tg.br.by + G.fy + tg.br.h / 2;
       if (tg.boss) {
         spawnBossFire(tg.br, bx, by, d, tg);
+        // THE FRACTURED HOUR: the Regent's volleys are RECORDED and echo
+        // back pale 4 seconds later (the replay queue, updateHourglass)
+        if (hourglassState() && G.finale.beat >= 1 && tg.br.isBoss && !tg.br.mythic && !tg.br.hourOut) {
+          G.finale.hourglass.replayQ.push({
+            due: G.finale.beatT + 4, x: bx, y: by,
+            type: tg.br.poke.t, species: tg.br.poke.id,
+            kind: projectileKindFor(tg.br.poke.id, tg.br.poke.t),
+          });
+          if (G.finale.hourglass.replayQ.length > 4) G.finale.hourglass.replayQ.shift();
+        }
       } else {
         const src = tg.br;
         if (G.mode === 'junkie' && tg.pattern) {
@@ -5048,9 +6827,11 @@ function update(dt) {
         cs.strike = 0;
         if (absorbHit(G.paddle.x, shipY())) continue;
         G.invuln = 2;
+        // a MEMORY ECHO landing marks the realm-1 mastery as escaped-no-more
+        if (cs.echo && G.finale) G.finale.mastery.counters.echoHits = (G.finale.mastery.counters.echoHits || 0) + 1;
         addFloater(G.paddle.x, shipY() - 50, 'HIT!', '#ff5252', 22);
         burst(G.paddle.x, shipY(), '#ffd54f', 30, 320);
-        loseLife('BOSS BEAM');
+        loseLife(cs.echo ? 'MEMORY ECHO' : 'BOSS BEAM');
         return;
       }
     }
@@ -5276,18 +7057,24 @@ function update(dt) {
     // runs ONLY while a live friendly exists — a shot inside its hitR is
     // consumed and chips one heart pip; at 0 the traveler faints and the
     // objective FAILS. reduceFlash-safe feedback (a ring + floater, no bloom).
-    const fr = G.objective && G.objective.friendly;
-    if (!s.dead && fr && !fr.dead && fr.fhp > 0) {
-      const fx = fr.bx + G.fx, fy = fr.by + G.fy, fR = hitR + Math.max(fr.w, fr.h) / 2;
-      if (Math.abs(s.x - fx) < fR && Math.abs(s.y - fy) < fR) {
-        s.dead = true;
-        fr.fhp--; fr.flash = 0.7;
-        ringFx(fx, fy, '#ff80ab', 5, 34, 3, 0.35);
-        addFloater(fx, fy - fr.h / 2 - 10, fr.fhp > 0 ? '− ♥' : 'FELL!', '#ff80ab', 12);
-        tone(360, 0.07, 'sine', 0.05, -120);
-        if (fr.fhp <= 0) friendlyFaints(fr);
-        continue;
+    // (AFT-020 generalized: the objective traveler AND any awakened Sibyl
+    // clocks ride the same rule — G.friendlyList is cached once per frame)
+    if (!s.dead && G.friendlyList && G.friendlyList.length) {
+      let consumed = false;
+      for (const fr of G.friendlyList) {
+        if (fr.dead || !(fr.fhp > 0)) continue;
+        const fx = fr.bx + G.fx, fy = fr.by + G.fy, fR = hitR + Math.max(fr.w, fr.h) / 2;
+        if (Math.abs(s.x - fx) < fR && Math.abs(s.y - fy) < fR) {
+          s.dead = true; consumed = true;
+          fr.fhp--; fr.flash = 0.7;
+          ringFx(fx, fy, '#ff80ab', 5, 34, 3, 0.35);
+          addFloater(fx, fy - fr.h / 2 - 10, fr.fhp > 0 ? '− ♥' : 'FELL!', '#ff80ab', 12);
+          tone(360, 0.07, 'sine', 0.05, -120);
+          if (fr.fhp <= 0) friendlyFaints(fr);
+          break;
+        }
       }
+      if (consumed) continue;
     }
     // BULWARK BATTERY: the hex wall floats ahead of the pilot and eats
     // ordinary shots crossing it, one segment each
@@ -5352,7 +7139,8 @@ function update(dt) {
       // a NORMAL shot your type resists is deflected — no life lost. Heavy elite
       // blasts punch through your resist (that's what makes elites scary).
       if (eff === -1 && !s.heavy) {
-        s.dead = true; G.invuln = 0.55;
+        s.dead = true;
+        G.invuln = Math.max(G.invuln, 0.55); // a deflect never SHORTENS existing grace
         statsDeflect();
         addFloater(G.paddle.x, py - 42, 'RESISTED', pc, 12);
         burst(s.x, py, pc, 10, 150, 0.4);
@@ -5428,7 +7216,8 @@ function update(dt) {
   compactInPlace(G.powerups, p => !p.dead);
 
   // ---- level clear → reinforcements first, then draft and move on ----
-  if (G.state === 'play' && G.dramaticT <= 0 && G.bricks.every(b => b.dead || b.barrier || b.crosser || b.friendly)) {
+  if (G.state === 'play' && G.dramaticT <= 0 && !(G.finale && G.finale.codaHold)
+    && G.bricks.every(b => b.dead || b.barrier || b.crosser || b.friendly || b.gridTerminal)) {
     // an active objective holds the wave open — SURVIVE outlasts the timer,
     // ESCORT/DEFEND protects the friendly. A FAILED objective releases the
     // wave to a normal attrition clear (losing the bonus is the only cost).
@@ -5445,8 +7234,9 @@ function update(dt) {
       return;
     }
     // A gauntlet is not clear between rounds, even though every entity from
-    // the previous round is dead for one frame.
-    if (G.gauntlet && G.gauntlet.phase < 2) return;
+    // the previous round is dead for one frame. The RAID has no rounds —
+    // its Sovereign falling IS the clear (phase stays 0 by design).
+    if (G.gauntlet && G.gauntlet.phase < 2 && !(G.finale && G.finale.format === 'raid')) return;
     // waits for the generous catch window, then continues whether caught or
     // deliberately left behind.
     if (secretEligible() && G.level <= 2 && !G.secret.shards[G.level - 1] && !G.secret.offered[G.level - 1]) {
@@ -5460,12 +7250,26 @@ function update(dt) {
     if (G.level === 27 && !G.trial && !G.daily) {
       G.score += Math.round((300 + 2 * 250) * (G.fx_score ? 2 : 1));
       statsEndLevel();
+      completeFinale(); // the final chase resolves its mastery INTO the Dawn
       beginEnding();
       return;
     }
     const clearedStage = stageIdx(G.level);
     const secretVictory = !!(G.secret.vmax && clearedStage === 2);
     statsEndLevel();
+    if (clearedStage === 2) completeFinale(); // resolve mastery BEFORE results read it
+    // AFT-020 PREPARATION: completing the Challenge stage's realm objective
+    // banks ONE temporary benefit for the finale — spent at the finale
+    // build, expired at its clear, never a permanent pick or extra offer.
+    {
+      const Lc = statsCur();
+      if (clearedStage === 1 && Lc && Lc.objectiveDone && !G.trial && !G.daily) {
+        G.prep = { realm: regionIdx(G.level) };
+        setAnnounce('shield', '#a5d6a7', 'PREPARATION SECURED',
+          'THE FINALE OPENS WITH A READIED DEFENSE', 2.8);
+      }
+      if (clearedStage === 2) G.prep = null; // preparation never outlives its finale
+    }
     G.score += Math.round((300 + clearedStage * 250) * (G.fx_score ? 2 : 1));
     // ---- STAGE RESULTS (Milestone 1): every clear pauses on a one-tap
     // interstitial — score, the combat ledger, and mastery objectives —
@@ -5478,12 +7282,16 @@ function update(dt) {
     SFX.stageClear();
     if (G.results.objectives.some(o => o.isNew)) setTimeout(() => SFX.medal(), 650);
     G.clearedStage = clearedStage;
+    if (clearedStage === 2) completeFinale(); // AFT-020: close the beat clocks + ledger stamp
     if (G.deathsThisWave === 0) G.adapt = Math.min(1.15, G.adapt * 1.04); // flawless → push back
     // AFT-007: the region-clear life rides the AEGIS capstone now (the old
     // `revive` key is the CROWNED RELIC weapon tier)
-    if (clearedStage === 2 && upgN('aegisX')) {
+    // AFT-008 §9.7: the realm reward RESTORES a missing segment — it never
+    // grows the maximum again (the +1 max lives on acquisition, once)
+    if (clearedStage === 2 && upgN('aegisX') && G.lives < Math.max(1, G.livesMax)) {
       G.lives++;
-      addFloater(W / 2, H * 0.42, PATHS.aegis.tiers[3].name + ' — +1 LIFE', '#66bb6a', 20);
+      statsLifeGain('aegisX');
+      addFloater(W / 2, H * 0.42, PATHS.aegis.tiers[3].name + ' — SEGMENT RESTORED', '#66bb6a', 20);
     }
     // draft: advance one of up to three paths (skip maxed ones)
     rollUpgradeChoices();

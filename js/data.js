@@ -378,12 +378,15 @@ const STARTER_KIT = {
         'WATER OFFENSE/DEFENSE · SHOTS BUILD 28% LESS HEAT',
       ],
     }),
+  // AFT-008 §9.4: the electric line is FAST CHAIN/SURGE TEMPO now, not raw
+  // supremacy — the old 2.2×/0.58-cadence/75%-Surge inheritance defined the
+  // whole campaign's ceiling before any path or matchup. Identity kept.
   electric: starterKit([
-      '+50% DAMAGE · 35% MEGA · CHAIN EVERY 6 HITS',
-      '+80% DAMAGE · 55% MEGA · CHAIN 2',
-      '+120% DAMAGE · 75% MEGA · CHAIN 3',
+      '+15% DAMAGE · FASTER FIRE · 20% MEGA · CHAIN EVERY 8 HITS',
+      '+25% DAMAGE · FASTER FIRE · 35% MEGA · CHAIN EVERY 7',
+      '+40% DAMAGE · RAPID FIRE · 50% MEGA · CHAIN 2 EVERY 6',
     ],
-    { damage: [1.5, 1.8, 2.2], megaStart: [0.35, 0.55, 0.75], megaPassive: [0.012, 0.02, 0.03], fireRate: [0.82, 0.7, 0.58], chainEvery: [6, 5, 4], chainTargets: [1, 2, 3] }),
+    { damage: [1.15, 1.25, 1.4], megaStart: [0.2, 0.35, 0.5], megaPassive: [0.006, 0.01, 0.015], fireRate: [0.95, 0.9, 0.82], chainEvery: [8, 7, 6], chainTargets: [1, 1, 2] }),
   grass: starterKit(['+20% DROPS · EXPANDED CATCH', '+35% DROPS · WIDER CATCH', '+50% DROPS · WIDEST CATCH'],
     { drop: [1.2, 1.35, 1.5], catchReach: [16, 22, 28] }),
   ice: starterKit(['EVERY 10 KOS SLOWS TIME 3s', 'EVERY 8 KOS SLOWS TIME 4s', 'EVERY 6 KOS SLOWS TIME 5s'],
@@ -597,7 +600,7 @@ const PATHS = {
       visual: 'SEGMENTED GREEN ARMOR PLATES WIDEN THE SHIELD ARC' },
     { key: 'wide',      icon: 'wide',   name: 'LONG FRAME',   desc: 'PADDLE PERMANENTLY 18% WIDER',
       sdesc: 'CATCH REACH +18% · YOUR HURTBOX STAYS SMALL', visual: 'GREEN SIDE WINGS EXTEND YOUR COLLECTION REACH' },
-    { key: 'aegisX',    icon: 'shield', name: 'SUPER SHIELD', desc: 'A SHIELD CHARGE REGROWS EVERY 10 SECONDS · +1 LIFE NOW AND EVERY REGION CLEARED',
+    { key: 'aegisX',    icon: 'shield', name: 'SUPER SHIELD', desc: 'A SHIELD CHARGE REGROWS EVERY 10 SECONDS · +1 MAX LIFE NOW · A MISSING SEGMENT RESTORED EACH REGION',
       visual: 'A ROTATING REGENERATOR MARK TRAVELS THE SHIELD CROWN' },
   ]},
   surge: { name: 'SURGE', role: 'MEGA TEMPO', family: 'tempo', color: '#ffd54f',
@@ -934,6 +937,13 @@ function webBridge(key) { return WEB_BRIDGES.find(b => b.key === key) || null; }
 function webFusion(key) { return WEB_FUSIONS.find(f => f.key === key) || null; }
 function webApex(key) { return WEB_APEXES.find(x => x.key === key) || null; }
 function satelliteForPath(pk) { return WEB_SATELLITES.find(s => s.path === pk) || null; }
+// AFT-008 §9.9: forever-stacks keep their stored integers but their
+// EFFECTIVE value diminishes — full value for five, half for the next
+// five, nothing beyond ten. Combat math reads through this everywhere.
+function effStacks(n) {
+  n = Math.max(0, n | 0);
+  return Math.min(5, n) + Math.max(0, Math.min(10, n) - 5) * 0.5;
+}
 function stackItem(stackKey) { return STACK_ITEMS.find(s => s.key === stackKey) || null; }
 // the pilot's evolution Form (1-3) — the web's ring gate. NO PARTNER's drone
 // and every starter line advance G.starterLvl on the journey's act boundaries
@@ -1058,7 +1068,7 @@ function advancePath(p) {
   G.upg[tier.key] = 1;
   // AFT-007: the extra-life perk lives on the AEGIS capstone now (the old
   // `revive` key is the CROWNED RELIC weapon tier and grants no life)
-  if (tier.key === 'aegisX') G.lives++;
+  if (tier.key === 'aegisX') { G.livesMax++; G.lives++; statsLifeGain('aegisX'); } // +1 MAX once, restored once (§9.7)
   return tier;
 }
 function regressPath(p) {
@@ -1110,6 +1120,56 @@ function regionIdx(lvl) { return Math.floor((lvl - 1) / STAGES) % SKIN.gens.leng
 function stageIdx(lvl) { return (lvl - 1) % STAGES; } // 0 arrival · 1 challenge · 2 boss
 function genFor(level) { return SKIN.gens[regionIdx(level)]; }
 function actIdx(lvl) { return Math.min(2, Math.floor(regionIdx(lvl) / 3)); }
+
+// ============================================================
+// AFT-020 FINALE SCHEMAS — locked in Phase 0; the finale director (Phase 1)
+// builds on these. ENGINE-ONLY: format keys, beat names, attack states,
+// counter verbs, and budget shapes. Skin-owned casts, titles, and copy live
+// in SKIN.finaleProfiles / SKIN.stageTitles (aetherfall authors first; the
+// Format keys are engine identifiers — storage/trial-stable, NEVER rename.
+// ============================================================
+const FINALE_FORMATS = {
+  ladder:    { beats: ['opening', 'core', 'coda'] },        // R1 only: group → sovereign → mastery coda
+  relay:     { beats: ['relay', 'descent', 'coda'] },       // continuous pursuit, carrier passes
+  siege:     { beats: ['stations', 'weather', 'coda'] },    // sovereign present from the start
+  hourglass: { beats: ['awaken', 'regent', 'stolenHour'] }, // protect → linked dual timeline
+  circuit:   { beats: ['duel', 'grid', 'victoryFlame'] },   // branching duel → redirectable grid
+  hunt:      { beats: ['shedding', 'shadow', 'rescue'] },   // hunt → main boss → rescue climax
+  rite:      { beats: ['rites', 'eclipse', 'reclaim'] },    // non-HP tests → saboteured sovereign
+  raid:      { beats: ['assembly', 'crown', 'window'] },    // simultaneous fight, one shared meter
+  chase:     { beats: ['route', 'pursuit', 'fusion'] },     // route choice → chase → linked climax
+};
+// Every major authored action passes through these states, in order. 'teach'
+// is harmless, 'tell' is the unmistakable cue, 'commit' locks the actor,
+// 'resolve' evaluates once, 'recover' opens the punish/relief window.
+const ATTACK_STATES = ['teach', 'tell', 'commit', 'resolve', 'recover'];
+// How a committed action is answered. The counter-answer budget (no more
+// than three finales lean on chargeBreak as the PRIMARY answer) is a suite
+// assertion once profiles land, not a per-fight switch.
+const COUNTER_VERBS = ['sustain', 'chargeBreak', 'move', 'bait', 'protect', 'order', 'aspect', 'intercept'];
+// Ledger vocabulary for counter outcomes (statsAttack in the director).
+const COUNTER_RESULTS = ['taught', 'committed', 'countered', 'failed', 'skipped'];
+// Budget shape carried by each finale beat (BE = the realm's Sovereign HP
+// unit already stamped per-wave as L.beUnit): { work: BE fraction, threat:
+// multiplier vs starThreatCap while the beat runs, recovery: authored calm
+// seconds on completion }. Mastery payload is non-persistent inside the
+// finale: 'clear' → 'countered' (fifth offer) → 'mastered' (pin + reroll).
+function finaleProfile(rIdx2) {
+  return (SKIN.finaleProfiles && SKIN.finaleProfiles[rIdx2]) || null;
+}
+// Optional realm-authored display titles (SKIN.stageTitles[region][stage]);
+// the structural ARRIVAL / CHALLENGE / finale subtitle stays for orientation.
+function stageTitle(lvl) {
+  const t = SKIN.stageTitles && SKIN.stageTitles[regionIdx(lvl)];
+  return (t && t[stageIdx(lvl)]) || null;
+}
+// A realm may NAME a shared condition in its own words — the mechanics stay
+// the engine's MODIFIERS; only the player-facing label and clause reskin.
+function conditionInfo(mod, rIdx2) {
+  if (!mod) return null;
+  const t = SKIN.conditionNames && SKIN.conditionNames[rIdx2] && SKIN.conditionNames[rIdx2][mod.key];
+  return t ? { ...mod, name: t.name || mod.name, desc: t.desc || mod.desc } : mod;
+}
 
 // ---- CHEAT CODES (pause screen): grant any power-up combination. Using
 // one marks the run G.cheated — best score won't be recorded that run.

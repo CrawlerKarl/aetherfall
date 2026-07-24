@@ -115,9 +115,15 @@ function devRunReport() {
   const agg = (field) => levels.reduce((n, L) => n + (L[field] || 0), 0);
   const hitsBy = {};
   for (const L of levels) for (const k in (L.dmgInBy || {})) hitsBy[k] = (hitsBy[k] || 0) + L.dmgInBy[k];
+  // AFT-008: merge the per-level source maps into run totals
+  const mergeBy = (field) => {
+    const out = {};
+    for (const L of levels) for (const k in (L[field] || {})) out[k] = +((out[k] || 0) + L[field][k]).toFixed(3);
+    return out;
+  };
   return {
     generated: new Date().toISOString(),
-    build: 'wavebreaker-dev-report-v1',
+    build: 'wavebreaker-dev-report-v2',
     run: {
       mode: G.mode, preset: SETTINGS.preset, starter: G.starter || 'none',
       seed: G.runSeed, trial: G.trial, daily: G.daily, cheated: G.cheated,
@@ -136,9 +142,23 @@ function devRunReport() {
       overheats: agg('overheats'), coolingTime: +agg('coolT').toFixed(1),
       absorbs: agg('absorbs'), deflects: agg('deflects'),
       knockouts: rs.knockouts || 0, megas: agg('megas'), rerolls: agg('rerolls'),
+      // AFT-008 baseline aggregates
+      dmgRelic: +agg('dmgRelic').toFixed(1), dmgSurgeWindow: +agg('dmgSurge').toFixed(1),
+      playTime: +agg('t').toFixed(1),
+      progressTime: +agg('tProg').toFixed(1), activeThreatTime: +agg('tActive').toFixed(1),
+      workHp: +agg('workHp').toFixed(1),
+      bossEquivalents: +(levels.reduce((n, L) => n + (L.beUnit ? (L.workHp || 0) / L.beUnit : 0), 0)).toFixed(2),
+      dmgByCategory: mergeBy('dmgCat'),
+      surgeBySource: mergeBy('surgeBy'),
+      shieldsBySource: mergeBy('shieldBy'),
+      livesBySource: mergeBy('lifeBy'),
+      dropsByKey: mergeBy('dropsBy'),
+      killsRenewable: agg('killsRenew'),
+      channelsOpen: agg('channelsOpen'), channelsBroken: agg('channelsBroken'),
     },
     session: { restarts: SESSION_STATS.restarts, quits: SESSION_STATS.quits },
     upgrades: levels.flatMap(L => (L.upgrades || []).map(u => ({ afterLevel: L.lv, pick: u }))),
+    offers: rs.offers || [],
     levels,
   };
 }
@@ -230,6 +250,17 @@ window.DEV = {
   boss(region = 1, round = 1, opts = {}) {
     return devLaunch({ region, stage: 3, round, ...opts });
   },
+  // AFT-020: exact finale-beat launch. `beat` accepts an index (0..3 — maps
+  // 1:1 to the gauntlet round today; 3 = the secret) or a beat KEY from the
+  // realm's format ('opening'/'core'/'coda' on a ladder).
+  finale(region = 1, beat = 0, opts = {}) {
+    let idx = beat;
+    if (typeof beat === 'string') {
+      const fmt = (finaleProfile(region - 1) || {}).format || 'ladder';
+      idx = Math.max(0, (FINALE_FORMATS[fmt] || FINALE_FORMATS.ladder).beats.indexOf(beat));
+    }
+    return devLaunch({ region, stage: 3, round: idx, ...opts });
+  },
   report: devRunReport,
   // AFT-017 reference captures: every vessel family × 3 forms × LIGHT/DARK,
   // side by side, downloaded as one PNG contact sheet. Run it twice if PNG
@@ -281,6 +312,7 @@ window.DEV = {
     console.log([
       'DEV.launch({level|region+stage, round, mode, diff, starter, seed, upg, real})',
       'DEV.boss(region 1-9, round 1-3, opts) — jump straight to a boss round',
+      "DEV.finale(region, beat|'core'|'coda', opts) — exact finale-beat launch",
       'DEV.grant("arsenal:3,aegis:2,vshred") — grant paths / web nodes / stacks',
       'DEV.report() — balance report object · DEV.download() — save as JSON',
       'DEV.panel() / F9 — live balance dashboard overlay',

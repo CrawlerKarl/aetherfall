@@ -26,9 +26,9 @@ function starterTierValue(key, tier) {
 }
 function applyStarterTierUpgrade(fromTier, toTier) {
   const hpGain = Math.max(0, starterTierValue('bonusHp', toTier) - starterTierValue('bonusHp', fromTier));
-  if (hpGain) { G.lives += hpGain; G.livesMax += hpGain; }
+  if (hpGain) { G.lives += hpGain; G.livesMax += hpGain; statsLifeGain('starterTier'); }
   const shieldGain = Math.max(0, starterTierValue('shieldStart', toTier) - starterTierValue('shieldStart', fromTier));
-  if (shieldGain) G.shieldCharges = Math.min(shieldCap(), G.shieldCharges + shieldGain);
+  if (shieldGain) { G.shieldCharges = Math.min(shieldCap(), G.shieldCharges + shieldGain); statsShieldGain('starterTier'); }
   const megaFloor = starterTierValue('megaStart', toTier);
   if (megaFloor) G.mega = Math.max(G.mega, megaFloor);
 }
@@ -174,7 +174,7 @@ function clearCheckpoint() { RUN_CKPT = null; saveStore(storeKey('run'), null); 
 // the current skin's checkpoint/codex/medals/victories/best/daily/coach
 // state. Import NEVER writes an unknown key, NEVER writes a checkpoint that
 // fails migrateCheckpoint, and always snapshots a pre-import backup first.
-const EXPORT_SKIN_KEYS = ['run', 'best', 'victory', 'medals', 'dex', 'dexs', 'daily', 'jcoach', 'relicNotice'];
+const EXPORT_SKIN_KEYS = ['run', 'best', 'victory', 'medals', 'dex', 'dexs', 'daily', 'jcoach', 'relicNotice', 'crests'];
 const EXPORT_GLOBAL_KEYS = ['pkbrk-settings', 'pkbrk-music'];
 function exportBundle() {
   const keys = {};
@@ -311,6 +311,12 @@ const G = {
   scoreShown: 0, comboPop: 0, // HUD juice: counting score + combo pop-scale
   announce: null, announceQueue: [], modifier: null, combatNotice: null,
   reveal: null, revealDock: null, // AFT-002: the boss-reveal scene + HUD-lane dock
+  // AFT-020: the finale director's state (null outside a finale; the old
+  // G.gauntlet stays alongside as the compatibility adapter during migration)
+  // shape when live: { realm, format, beat, beatT, actors, objective, mastery,
+  //   carry, reward, budgets, clocks, procEligibility, entry }
+  finale: null,
+  prep: null, // temporary Challenge→finale PREPARATION benefit (expires after the finale)
   fx: 0, fy: 0, swayT: 0,
   brickW: 0, brickH: 0,
   shake: 0, flashT: 0, stateT: 0,
@@ -401,6 +407,9 @@ function setCombatNotice(text, color, duration = 1.15) {
   G.combatNotice = { text, color, t: duration, max: duration };
 }
 function bossPhaseCount(br) { return Math.max(1, br?.phaseCount || 3); }
+// AFT-020 TIME SPIRAL: the second lap tightens finale TELL clocks ×0.9 —
+// mechanics and counters stay identical (plan §7.10)
+function spiralTellMul() { return (G.finale && G.finale.spiral) ? 0.9 : 1; }
 function bossLastStand(br) { return (br?.phase || 1) >= bossPhaseCount(br); }
 // ============================================================
 //  BALANCE INSTRUMENTATION (Milestone 0) — one compact record per wave
@@ -422,6 +431,15 @@ function statsBeginLevel(lv) {
     dmgN: 0, dmgC: 0, dmgBall: 0, dmgSplash: 0, dmgOther: 0,
     overheats: 0, coolT: 0, megas: 0, rerolls: 0,
     upgrades: [], bossPhases: {},
+    // AFT-008 baseline fields: encounter-economy clocks + attributed sources.
+    // tProg = seconds a damageable target/objective existed (meaningful
+    // progress); tActive = seconds under live hostile threat. workHp/beUnit
+    // are stamped at wave build (total enemy HP, and the region's Sovereign
+    // HP as the Boss-Equivalent unit). dmgCat records damage ADDED by each
+    // multiplier category inside damageBrick; dmgSurge is damage landed
+    // while the overdrive window ran.
+    tProg: 0, tActive: 0, workHp: 0, beUnit: 0, dmgSurge: 0,
+    dmgCat: {}, surgeBy: {}, shieldBy: {}, lifeBy: {}, dropsBy: {},
   };
   G.runStats.levels.push(L);
   if (G.runStats.levels.length > 220) G.runStats.levels.shift(); // marathon cap
@@ -448,6 +466,7 @@ function statsShotFired(charged) { const L = statsCur(); if (L) { if (charged) L
 function statsChargeWasted() { const L = statsCur(); if (L) L.chargeWasted++; }
 function statsDmgOut(source, dmg) {
   const L = statsCur(); if (!L) return;
+  if (G.megaT > 0) L.dmgSurge += dmg; // damage landed inside the overdrive window
   if (source === 'bolt') L.dmgN += dmg;
   else if (source === 'charge') { L.dmgC += dmg; L.chargeHits++; }
   else if (source === 'ball') L.dmgBall += dmg;
@@ -476,6 +495,46 @@ function specVeilActive(br) {
   return !!br.specVeil && ((G.time + br.specVeil.ph) % 3.4) < 2.0;
 }
 function statsShellCrack() { const L = statsCur(); if (L) L.shellCracks = (L.shellCracks || 0) + 1; }
+// ---- AFT-008 baseline instrumentation (all no-ops without a run record;
+// none of these allocates in a hot loop — per-frame calls mutate numbers) ----
+// meaningful-progress / active-threat clocks (classified once per frame in
+// update() next to statsPlayTick — see the classifier there)
+function statsClockTick(dt, prog, active) {
+  const L = statsCur(); if (!L) return;
+  if (prog) L.tProg += dt;
+  if (active) L.tActive += dt;
+}
+// damage ADDED (or removed) by one multiplier category inside damageBrick
+function statsDmgCat(cat, delta) {
+  const L = statsCur(); if (L && delta) L.dmgCat[cat] = (L.dmgCat[cat] || 0) + delta;
+}
+function statsShieldGain(src) { const L = statsCur(); if (L) L.shieldBy[src] = (L.shieldBy[src] || 0) + 1; }
+function statsLifeGain(src) { const L = statsCur(); if (L) L.lifeBy[src] = (L.lifeBy[src] || 0) + 1; }
+function statsDrop(key) { const L = statsCur(); if (L) L.dropsBy[key] = (L.dropsBy[key] || 0) + 1; }
+function statsChannel(ev) {
+  const L = statsCur(); if (!L) return;
+  const k = ev === 'open' ? 'channelsOpen' : 'channelsBroken';
+  L[k] = (L[k] || 0) + 1;
+}
+function statsKillRenew() { const L = statsCur(); if (L) L.killsRenew = (L.killsRenew || 0) + 1; }
+// each dealt draft hand, run-level (drafts land between level records)
+function statsOffer(keys) {
+  if (!G.runStats) return;
+  (G.runStats.offers = G.runStats.offers || []).push({ lv: G.level, keys });
+  if (G.runStats.offers.length > 260) G.runStats.offers.shift();
+}
+// THE Surge-meter funnel: identical clamp to the inline sites it replaces
+// (G.mega = Math.min(1, G.mega + amt)), plus source + overflow attribution.
+// Call-site guards (G.megaT <= 0, !meta.noMega, …) stay at the call sites.
+function gainMega(amt, src) {
+  if (!(amt > 0)) return;
+  const before = G.mega;
+  G.mega = Math.min(1, before + amt);
+  const L = statsCur(); if (!L) return;
+  L.surgeBy[src] = (L.surgeBy[src] || 0) + amt;
+  const over = before + amt - 1;
+  if (over > 0) L.surgeBy.wasted = (L.surgeBy.wasted || 0) + over;
+}
 // ENCOUNTER OBJECTIVE outcome (M3 Round C): records the protect-objective
 // resolution on the current level ledger so RESULTS can surface one line.
 function statsObjective(type, done) {
@@ -487,6 +546,19 @@ function statsObjective(type, done) {
 // journeys only (never trial/daily/cheated). Survives corrupt storage via
 // the loadStore guard, same pattern as SETTINGS.
 const MEDALS = (v => (v && typeof v === 'object' && !Array.isArray(v)) ? v : {})(loadStore(storeKey('medals'), '{}'));
+// ---- REALM CRESTS (AFT-020 §8): the best finale-mastery result per
+// realm/mode/difficulty — durable recognition, never combat power. Real
+// journeys only; feeds the journey map, dossiers and Boss Rush later.
+const CRESTS = (v => (v && typeof v === 'object' && !Array.isArray(v)) ? v : {})(loadStore(storeKey('crests'), '{}'));
+function crestRank(v) { return v === 'mastered' ? 3 : v === 'countered' ? 2 : v === 'clear' ? 1 : 0; }
+function awardCrest(realm, result) {
+  if (G.trial || G.daily || G.cheated) return false;
+  const key = realm + ':' + G.mode + ':' + SETTINGS.preset;
+  if (crestRank(result) <= crestRank(CRESTS[key])) return false;
+  CRESTS[key] = result;
+  saveStore(storeKey('crests'), CRESTS);
+  return true;
+}
 function medalEarned(lvl, key) { return !!(MEDALS[lvl] && MEDALS[lvl][key]); }
 function awardMedal(lvl, key) {
   if (medalEarned(lvl, key)) return false;
@@ -525,12 +597,17 @@ function buildStageResults() {
   const topFam = Object.entries(L.dmgInBy || {}).sort((a, b) => b[1] - a[1])[0];
   return {
     lvl, region: genFor(lvl).name, stage: SKIN.stageNames[stageIdx(lvl)],
+    stageTitle: stageTitle(lvl), // the authored display name (subtitle keeps the structure)
     nextName: lvl >= 27 ? null
       : stageIdx(lvl) === 2 ? genFor(lvl + 1).name + ' · ' + SKIN.stageNames[0]
         : genFor(lvl).name + ' · ' + SKIN.stageNames[stageIdx(lvl) + 1],
     t: L.t || 0, kills: L.kills || 0, score: G.score,
     hitsTaken, topFam: topFam ? topFam[0] : null,
     objective: L.objective || null, objectiveDone: !!L.objectiveDone,
+    // AFT-020: the finale names what the player mastered (never a rank)
+    finaleMastery: (G.finale && stageIdx(lvl) === 2 && G.finale.mastery.clear)
+      ? (G.finale.mastery.mastered ? 'mastered' : G.finale.mastery.countered ? 'countered' : 'clear') : null,
+    finaleTitle: (G.finale && G.finale.profile && stageIdx(lvl) === 2) ? G.finale.profile.title : null,
     shotsN: L.shotsN || 0, shotsC: L.shotsC || 0,
     overheats: L.overheats || 0, megas: L.megas || 0,
     catches: G.caughtRun, medalsSaved: !G.trial && !G.daily && !G.cheated,
@@ -637,8 +714,34 @@ function applyPower(p, srcType) {
     case 'magnet': bump('fx_magnet', 12); break;
     case 'star':   bump('fx_score', 15); break;
     case 'draco':  bump('fx_draco', 10); break;
+    case 'wish': { // AFT-020 siege coda: ONE caught wish shapes the draft
+      const idx = Math.max(0, Math.min(2, p.wishIdx || 0));
+      if (G.finale) {
+        G.finale.wish = ['commit', 'adapt', 'explore'][idx];
+        G.finale.mastery.counters.wish = idx + 1;
+        if (G.finale.coda) G.finale.codaHold = false; // the choice is made
+      }
+      for (const pu2 of G.powerups) if (pu2.p && pu2.p.key === 'wish') pu2.dead = true;
+      G.score += Math.round(300 * scoreMult());
+      sparkle(G.paddle.x, shipY() - 24, 10, true);
+      addFloater(G.paddle.x, shipY() - 46, (p.name || 'WISH') + ' — YOUR DRAFT LISTENS', '#ffd54f', 13);
+      SFX.mega();
+      return;
+    }
+    case 'bloom': { // AFT-020 relay coda: a gathered bloom — score + mastery
+      G.score += Math.round(200 * scoreMult());
+      if (G.finale) {
+        G.finale.mastery.counters.blooms = (G.finale.mastery.counters.blooms || 0) + 1;
+        if (G.finale.meter) G.finale.meter.value = G.finale.mastery.counters.blooms;
+      }
+      sparkle(G.paddle.x, shipY() - 24, 8, true);
+      addFloater(G.paddle.x, shipY() - 44, (p.name || 'BLOOM') + ' +200', '#b9f6ca', 13);
+      SFX.power();
+      return; // its floater is the whole read — no announce card, no element
+    }
     case 'shield':
       G.shieldCharges = Math.min(shieldCap(), G.shieldCharges + 1);
+      statsShieldGain('drop');
       tier = G.shieldCharges;
       SFX.shield();
       break;
@@ -650,6 +753,7 @@ function applyPower(p, srcType) {
       // RESCUE CIRCUIT: recovery also restores a shield charge (heartbeat ring)
       if (upgN('rescue') && G.shieldCharges < shieldCap()) {
         G.shieldCharges++;
+        statsShieldGain('rescue');
         ringFx(G.paddle.x, shipY(), '#ff8a80', 5, 54, 3, 0.4);
         addFloater(G.paddle.x, shipY() - 34, 'RESCUE SHIELD!', '#ff8a80', 12);
         SFX.shield();
@@ -659,6 +763,7 @@ function applyPower(p, srcType) {
         G.score += 250;
         p = { ...p, name: 'POTION BONUS', desc: 'HP FULL · +250 POINTS' };
       } else {
+        statsLifeGain('potion');
         ringFx(G.paddle.x, shipY(), p.color, 8, 84, 4, 0.55);
         addFloater(G.paddle.x, shipY() - 54, '+1 HP', p.color, 22);
       }
@@ -908,6 +1013,10 @@ function buildLevel(lvl) {
   G.secret.pendingShard = null; G.secret.vmax = false; G.secret.rewardDraft = false;
   G.secret.deferredChoices = null;
   if (stageIdx(lvl) !== 2) G.gauntlet = null;
+  G.finale = null; // AFT-020: the finale director re-arms per wave (Phase 1+)
+  // a rebuilt wave never inherits a reveal or a docked HP lane — a knockout
+  // retry was showing the PREVIOUS attempt's boss bar over round one
+  G.reveal = null; G.revealDock = null;
   G.gustT = 0; G.timeWarpT = 0; G.timeWarpClock = 0; G.gridRect = null;
   const gen = genFor(lvl), rIdx = regionIdx(lvl), stage = stageIdx(lvl);
   // one ECOLOGY per wave: every squad and rank draws from the same habitat
@@ -975,6 +1084,21 @@ function buildLevel(lvl) {
       legend.bx = legend.hx = -2000; // parked off-stage until round 2
       G.gauntlet = { phase: 0, origX: W / 2, legendHp: bossHp, subT: 0, subAbilityCD: 4, entry: null };
       G.sentinelGuardTaught = false; // the guard/opening strip teaches once per wave
+      // AFT-020: the finale DIRECTOR arms alongside the gauntlet (the
+      // gauntlet remains the round adapter; the director owns format, beat,
+      // clocks and mastery so Trial, presentation and the ledger read ONE
+      // contract in every realm — and, for non-ladder formats, the rules).
+      const fp = finaleProfile(rIdx);
+      const fmt = (fp && fp.format) || 'ladder';
+      G.finale = {
+        // TIME SPIRAL remix: learned campaigns run modestly tighter tells
+        // (spiralTellMul ×0.9) — same mechanics, same counter solutions
+        spiral: cycle > 0,
+        realm: rIdx, format: fmt, profile: fp || null,
+        beat: 0, beatKey: (FINALE_FORMATS[fmt] || FINALE_FORMATS.ladder).beats[0], beatT: 0,
+        beatClocks: {},
+        mastery: { clear: false, countered: false, mastered: false, counters: {} },
+      };
       const subs = gen.gauntlet.subs;
       const subHp = Math.max(5, Math.round(bossHp * (subs.length === 1 ? 0.85 : 0.42)));
       for (let i = 0; i < subs.length; i++) {
@@ -991,12 +1115,222 @@ function buildLevel(lvl) {
         getSprite(sid);
       }
       getSprite(gen.gauntlet.myth[0]);
-      setAnnounce('alert', gen.accent, 'THE ' + gen.name + ' GAUNTLET',
-        'ROUND 1 — THE SENTINELS: ' + subs.map(x => SKIN.names[x[0]].toUpperCase()).join(' · '), 3.6,
-        (G.mode === 'junkie' ? gauntletEntranceName(SKIN.sentinelEntranceStyles[rIdx]) + ' · ' : '') +
-          'THREE ROUNDS — 1 PHASE · 2 PHASES · 3 PHASES', null, false, true, 'boss');
-      // AFT-002: the round-1 reveal — the sentinel trio, one shared contract
-      beginBossReveal('sentinels', G.bricks.filter(b => b.subBoss && !b.dead));
+      // THE FIRST COVENANT (the one ladder, realm 1): the Heralds are ONE
+      // mechanism — the TRIUNE WARD. A fallen Herald leaves a permanent
+      // GAP: the survivors' guard visibly weakens (×0.55 → ×0.75 → ×0.9),
+      // and the Sovereign REMEMBERS — its blink steps record the player's
+      // position and echo back as delayed lane strikes; denying two of its
+      // focus anchors breaks the memory for a long punish window.
+      if (fmt === 'ladder' && rIdx === 0) {
+        G.finale.ward = { fallen: 0, anchorsDown: 0 };
+        G.finale.memory = [];
+      }
+      // THE GALE RELAY (format 'relay'): the trio carries ONE storm core.
+      // Vows never fall to damage — carrier hits feed the PASS METER
+      // (3 passes × 0.14 BE of real work); the other two mark the wind
+      // corridor. The round controller's all-dead check stays as the
+      // practice-jump fallback, so trials and direct kills still advance.
+      // (Flagged HERE, after the sentinel push above put the Vows on board.)
+      if (fmt === 'relay') {
+        for (const v of G.bricks) if (v.subBoss && !v.dead) v.relayVow = true;
+        G.finale.relay = {
+          carrier: 0, passes: 0, need: 3,
+          passHp: Math.max(3, Math.round(bossHp * 0.14)), dealt: 0,
+          carryT: 0, carryDur: 11, cleanPass: true, cleanPasses: 0,
+          laneW: Math.max(120, W * 0.15),
+        };
+        G.finale.meter = { value: 0, max: 3, label: (fp.relay && fp.relay.meterLabel) || 'CORE' };
+      }
+      // THE SERAPH RAID (format 'raid'): no rounds, no sequential cleanup.
+      // The Sovereign never parks — it hangs overhead from the first second
+      // behind the crown's shield (×0.25 damage, honest cue) while the
+      // captains power its segments; damaging the segment's OWN captain
+      // fills the BREAK meter fastest. The mythic begins BOUND in arena
+      // vines — freeing it is optional risk/reward. The round controller
+      // is bypassed for this format; the director owns progression.
+      if (fmt === 'raid') {
+        const seraph = G.bricks.find(b => b.isBoss && b.dormant);
+        if (seraph) {
+          seraph.dormant = false;
+          seraph.bx = seraph.hx = W / 2;
+          seraph.raidSeraph = true;
+          seraph.phaseCount = 1; // progression is the crown, never HP thirds
+        }
+        for (const v of G.bricks) if (v.subBoss && !v.dead) v.raidCaptain = true;
+        const mid = gen.gauntlet.myth;
+        const bX = Math.min(W - 70, W * 0.88), bY = Math.max(200, H * 0.36);
+        G.bricks.push({
+          bx: bX, by: bY, hx: bX, hy: bY, row: -4, col: 0,
+          w: Math.min(84, bw * 1.1), h: Math.min(74, bh * 1.3),
+          hp: 999, maxHp: 999, bare: true, raidBound: true,
+          poke: { id: mid[0], t: mid[1], n: SKIN.names[mid[0]] },
+          flash: 0, wobble: 1.3,
+        });
+        getSprite(mid[0]);
+        for (let vi = 0; vi < 2; vi++) {
+          const vx3 = bX + (vi ? 30 : -30);
+          G.bricks.push({
+            bx: vx3, by: bY + 40, hx: vx3, hy: bY + 40, row: -4, col: 1 + vi,
+            w: 26, h: 40, hp: 2, maxHp: 2, bare: true, raidVine: true,
+            poke: { id: 0, t: 'grass', n: 'BINDING VINE' },
+            flash: 0, wobble: vi * 2.1,
+          });
+        }
+        G.finale.raid = {
+          seg: 0,
+          segments: [
+            { state: 'assembling', t: 0, owner: 0, broken: 0 },
+            { state: 'waiting', t: 0, owner: 1, broken: 0 },
+            { state: 'waiting', t: 0, owner: 2, broken: 0 },
+          ],
+          segNeed: Math.max(3, Math.round(bossHp * 0.12)),
+          assembleDur: 16, window: false, windowT: 0, freed: false, shieldCD: 0,
+        };
+        G.finale.meter = { value: 0, max: 1, label: (fp.raid && fp.raid.meterLabel) || 'BREAK' };
+      }
+      // THE FRACTURED HOUR (format 'hourglass'): the Sibyls begin hostile
+      // but are AWAKENED through their own openings (three open-window
+      // strikes each) into friendly forge clocks; the Regent yields only
+      // while a woken clock RINGS and its volleys REPLAY as pale echoes;
+      // at its midpoint the mythic INVADES and the two trade hours.
+      if (fmt === 'hourglass') {
+        for (const v of G.bricks) if (v.subBoss && !v.dead) { v.sibyl = true; v.sibylHits = 0; }
+        G.finale.hourglass = {
+          awakened: 0, invaded: false, hour: 'forge', hourT: 0, hourEvery: 8,
+          replayQ: [], silentCD: 0, outCD: 0,
+        };
+        G.finale.meter = { value: 0, max: 3, label: fp.beats[0].label || 'SIBYLS' };
+      }
+      // TRIAL OF THE LIVE GRID (format 'circuit'): the first Paladin the
+      // player strikes becomes THE DUEL (0.3 BE); the others stand down as
+      // neutral grid terminals. The grid beat's circuits illuminate their
+      // whole route first and can be REDIRECTED through the charged
+      // terminal. The coda is a ridden Victory Flame, never a fight.
+      if (fmt === 'circuit') {
+        for (const v of G.bricks) if (v.subBoss && !v.dead) v.paladin = true;
+        G.finale.circuit = {
+          chosen: null, redirects: 0, relit: 0,
+          active: null, armT: 6, grammar: 0, flameT: 0,
+        };
+        G.finale.meter = { value: 0, max: 1, label: fp.beats[0].label || 'DUEL' };
+      }
+      // THE FALSE FOUNDATION (format 'hunt'): the solo Serpent sheds four
+      // glass cells — TWO real (solid, 3 HP), TWO reflections (dashed,
+      // 1 HP, harmless lies). Both real cells broken → the Serpent FLEES
+      // unbeaten and the shadow wakes. Deep in that fight the mythic waits
+      // IMPRISONED — its facet is the rescue, never a fourth health bar.
+      if (fmt === 'hunt') {
+        for (const v of G.bricks) if (v.subBoss && !v.dead) {
+          v.serpent = true;
+          v.hp = v.maxHp = Math.max(4, Math.round(bossHp * 0.3));
+        }
+        const cellY = Math.max(190, H * 0.3);
+        for (let ci = 0; ci < 4; ci++) {
+          const real = ci < 2;
+          const cx2 = W * (0.2 + 0.2 * ci) + (real ? 0 : 8);
+          G.bricks.push({
+            bx: cx2, by: cellY + (ci % 2) * 46, hx: cx2, hy: cellY + (ci % 2) * 46,
+            row: -6, col: ci, w: 30, h: 42,
+            hp: real ? 3 : 1, maxHp: real ? 3 : 1,
+            bare: true, barrier: true, glassCell: true, reflection: !real,
+            poke: { id: 0, t: 'fairy', n: real ? 'GLASS CELL' : 'REFLECTION' },
+            flash: 0, wobble: ci * 1.3,
+          });
+        }
+        G.finale.hunt = {
+          realBroken: 0, sectors: 0, sectorHits: 0, freed: false,
+          sector: null, sectorCD: 6, prison: false,
+        };
+        G.finale.meter = { value: 0, max: 2, label: fp.beats[0].label || 'CELLS' };
+      }
+      // THE ECLIPSE RITE (format 'rite'): each Totem asks a brief NON-HP
+      // rite keyed by its slot — a rotating OPENING to strike through, a
+      // PULSE to hit on the beat, a growing ROOT to break in time. A
+      // completed mark keeps one safe star lit in the climax; killing a
+      // Totem the old way resolves its rite markless.
+      if (fmt === 'rite') {
+        let ri2 = 0;
+        for (const v of G.bricks) {
+          if (!v.subBoss || v.dead) continue;
+          v.totem = true;
+          v.riteKind = ['opening', 'pulse', 'root'][ri2 % 3];
+          v.riteHits = 0;
+          v.riteRoot = 0;
+          ri2++;
+        }
+        G.finale.rite = {
+          marks: 0, resolved: 0, moon: 'bright', moonT: 0, moonEvery: 7,
+          steal: null, stolen: 0, tags: 0, reclaimed: false, gateCD: 3.5, stealCD: 14,
+        };
+        G.finale.meter = { value: 0, max: 3, label: fp.beats[0].label || 'RITES' };
+      }
+      // THE FIRST FUSION (format 'chase'): the first Vessel struck opens
+      // the ROUTE (a 0.3 BE duel; its Aspect names the road); the other
+      // two SEAL — and later dance as the puppeteer's marionettes. The
+      // pursuit and the chained climax live in the director.
+      if (fmt === 'chase') {
+        for (const v of G.bricks) if (v.subBoss && !v.dead) v.vessel = true;
+        G.finale.chase = {
+          chosen: null, locks: 0, chains: 0, linked: false, exposed: false,
+          rush: null, rushCD: 7,
+        };
+        G.finale.meter = { value: 0, max: 1, label: fp.beats[0].label || 'ROUTE' };
+      }
+      // SIEGE OF THE DEEP CURRENT (format 'siege'): the Sovereign circles
+      // from the opening behind the PRESSURE SEAL (×0.12 damage while any
+      // Colossus stands). The three Colossi are order-choice stations at
+      // 0.15 BE each; every one broken strengthens ONE property of the
+      // final weather. The Sovereign's body leaves a CURRENT TRAIL whose
+      // safety alternates once the seal falls.
+      if (fmt === 'siege') {
+        const sov = G.bricks.find(b => b.isBoss && b.dormant);
+        if (sov) {
+          sov.dormant = false;
+          sov.bx = sov.hx = W / 2;
+          sov.siegeSov = true;
+        }
+        for (const v of G.bricks) {
+          if (!v.subBoss || v.dead) continue;
+          v.siegeColossus = true;
+          v.hp = v.maxHp = Math.max(4, Math.round(bossHp * 0.15)); // stations, not health walls
+        }
+        G.finale.siege = {
+          broken: [], trail: [], trailT: 0, trailR: 24,
+          burns: true, flipT: 0, flipEvery: 9, taughtT: 3.5,
+          weather: { quicken: 0, widen: 0, arm: 0 }, armT: 0,
+          sealCD: 0, hitCD: 0,
+        };
+        G.finale.meter = { value: 0, max: 3, label: fp.beats[0].label || 'SEAL' };
+      }
+      // AFT-020 PREPARATION spend: the banked Challenge benefit arrives as a
+      // readied defense — a shield if there's room, else a Surge head start.
+      // Never over cap, never an extra offer, never a skipped teach.
+      if (G.prep && G.prep.realm === rIdx && !G.trial && !G.daily) {
+        G.prep = null;
+        if (G.shieldCharges < shieldCap()) {
+          G.shieldCharges++;
+          statsShieldGain('prep');
+          setAnnounce('shield', '#a5d6a7', 'PREPARATION', 'YOUR READIED DEFENSE HOLDS — +1 SHIELD', 2.4);
+        } else {
+          gainMega(0.12, 'prep');
+          setAnnounce('mega', '#a5d6a7', 'PREPARATION', lex('SHIELDS FULL — +12% MEGA BANKED'), 2.4);
+        }
+      }
+      setAnnounce('alert', gen.accent, (fp && fp.title) || ('THE ' + gen.name + ' GAUNTLET'),
+        ((fp && fp.beats[0].label) || 'ROUND 1 — THE SENTINELS') + ': '
+          + subs.map(x => SKIN.names[x[0]].toUpperCase()).join(' · '), 3.6,
+        (fp && fp.beats[0].tip)
+          ? fp.beats[0].tip
+          : (G.mode === 'junkie' ? gauntletEntranceName(SKIN.sentinelEntranceStyles[rIdx]) + ' · ' : '') +
+            'THREE ROUNDS — 1 PHASE · 2 PHASES · 3 PHASES', null, false, true, 'boss');
+      // AFT-002: the opening reveal — the trio for a ladder/relay, but the
+      // raid's and siege's headliner is the SOVEREIGN already in the arena
+      if (fmt === 'raid' || fmt === 'siege') {
+        const sb = G.bricks.find(b => (b.raidSeraph || b.siegeSov) && !b.dead);
+        if (sb) beginBossReveal('legendary', [sb]);
+      } else {
+        beginBossReveal('sentinels', G.bricks.filter(b => b.subBoss && !b.dead));
+      }
     } else G.gauntlet = null;
     // pre-warm the boss's phase-tint silhouettes so the enrage transition
     // never pays a cache-miss hitch mid-fight
@@ -1089,7 +1423,7 @@ function buildLevel(lvl) {
   G.maneuver = null; G.maneuverCD = 8;
   G.deathsThisWave = 0;
   G.dangerWarned = false;
-  G.heat = 0; G.overheat = 0;
+  G.heat = 0; G.overheat = 0; G.shieldRegenN = 0;
   statsBeginLevel(lvl); // one balance record per wave ATTEMPT (retries too)
   G.highGroundDone = false; G.waveFirstKill = false; G.elementOrbCD = 9;
   // motionTier drives the boss guard-ring shimmer (mt>=1, regions 3+).
@@ -1219,8 +1553,9 @@ function buildLevel(lvl) {
     // stay compositionally tethered to it — they compress and reform through
     // teleports, exchange sides in phase 2, and become counter-rotating
     // orbits in the last stand (see the guard controller in update.js).
-    G.bricks = G.bricks.filter(b2 => b2.isBoss || b2.subBoss);
-    const nG = Math.min(12, 10 + (regionsIn >= 5 ? 2 : 0));
+    G.bricks = G.bricks.filter(b2 => b2.isBoss || b2.subBoss || b2.raidBound || b2.raidVine || b2.glassCell);
+    const raidWave = !!(G.finale && G.finale.format === 'raid');
+    const nG = raidWave ? 0 : Math.min(12, 10 + (regionsIn >= 5 ? 2 : 0)); // the raid's captains ARE the escort
     const perWing = nG / 2;
     const gw = Math.min(52, Math.max(IS_TOUCH ? 40 : 34, bw * 0.55));
     const gh = Math.min(46, Math.max(IS_TOUCH ? 35 : 30, bh * 0.78));
@@ -1420,12 +1755,29 @@ function buildLevel(lvl) {
   // dives (and squad maneuvers) only start once the journey hardens
   G.divers = classic ? false : junkie ? regionsIn >= 1 : (regionsIn >= 2 || (regionsIn >= 1 && stage >= 1));
   G.diveCD = 6;
-  if (upgN('guard')) G.shieldCharges = Math.max(G.shieldCharges, upgN('guard'));
+  if (upgN('guard')) {
+    const preGuard = G.shieldCharges;
+    G.shieldCharges = Math.max(G.shieldCharges, upgN('guard'));
+    if (G.shieldCharges > preGuard) statsShieldGain('guard');
+  }
   // ---- wave modifier: guaranteed on challenge stages, never on a region's arrival ----
-  G.modifier = stage === 1 && lvl >= 2
-    ? MODIFIERS[Math.floor(gameRand() * MODIFIERS.length)]
-    : (stage === 0 && lvl > STAGES && gameRand() < 0.25
-      ? MODIFIERS[Math.floor(gameRand() * MODIFIERS.length)] : null);
+  // AFT-020: realms with an AUTHORED condition run it on their Challenge
+  // stage every time — a realm identity, not a dice roll (same mechanics,
+  // this realm's name for them). Unauthored realms keep the random pool.
+  // The authored branch still consumes the SAME one gameRand() draw the
+  // random branch does, so the wave-build stream stays aligned per stage.
+  {
+    const authoredKey = SKIN.conditionAuthored && SKIN.conditionAuthored[rIdx];
+    if (stage === 1 && lvl >= 2) {
+      const roll = gameRand();
+      G.modifier = (authoredKey && MODIFIERS.some(m => m.key === authoredKey))
+        ? MODIFIERS.find(m => m.key === authoredKey)
+        : MODIFIERS[Math.floor(roll * MODIFIERS.length)];
+    } else {
+      G.modifier = (stage === 0 && lvl > STAGES && gameRand() < 0.25)
+        ? MODIFIERS[Math.floor(gameRand() * MODIFIERS.length)] : null;
+    }
+  }
   // ---- stage presentation ----
   if (hasBoss) {
     // gauntlet finales announce ROUND 1 instead — the legendary's own intro
@@ -1442,11 +1794,12 @@ function buildLevel(lvl) {
       [actTag, intro && intro.sub].filter(Boolean).join('  ·  '), null, false, true, 'region');
     SFX.regionIntro();
   } else if (G.modifier) {
-    const m = G.modifier;
+    const m = conditionInfo(G.modifier, rIdx); // the realm's own words for it
     setAnnounce(m.icon, m.color, m.name, m.desc, 3.2,
       [gen.name + ' 2/3', form && form.name + ' FORMATION', theme.name].filter(Boolean).join(' · '), null, false, false, 'region');
   } else {
-    setAnnounce(null, gen.accent, gen.name, 'STAGE 2/3 — CHALLENGE', 2.4,
+    setAnnounce(null, gen.accent, stageTitle(lvl) || gen.name,
+      stageTitle(lvl) ? gen.name + ' · STAGE 2/3 — CHALLENGE' : 'STAGE 2/3 — CHALLENGE', 2.4,
       [form && form.name + ' FORMATION', theme.name].filter(Boolean).join(' · '), null, false, false, 'region');
   }
   // hard readability cap: random form-skips + stream squads can land the
@@ -1471,6 +1824,15 @@ function buildLevel(lvl) {
   // threat multiplier. Boss stages keep their gauntlet choreography.
   G.director = null;
   G.objective = null;
+  // AFT-020: the wardbreak/lanes identities run in EVERY mode — outsmarting
+  // the wave is a cross-mode idea. The older families (survive/escort/
+  // defend) and the beat director remain STARFIGHTER's.
+  if (!hasBoss && G.mode !== 'junkie') {
+    const oX = encounterObjective(lvl);
+    if (oX && ['wardbreak', 'lanes', 'bells', 'undercard'].includes(oX.type)) {
+      G.objective = { ...oX, t: 0, done: false, failed: false, progress: 0 };
+    }
+  }
   if (G.mode === 'junkie' && !hasBoss) {
     const beats = encounterScript(lvl).map(b => ({ ...b, fired: false }));
     G.director = { beats, baseline: G.bricks.filter(b => !b.dead && !b.barrier).length,
@@ -1538,6 +1900,58 @@ function buildLevel(lvl) {
   // the guardian and chorus get their one proc back, the squadron stands down
   G.reactorUsed = false; G.vortexes = []; G.meteorRain = null;
   G.guardPulsedWave = false; G.chorusUsed = false; G.squadT = 0; G.lanceT = 0;
+  // AFT-020: non-attrition objectives mark their targets HERE, once the
+  // full population exists (the junkie flyer block adds its flock late).
+  // Ward sources are the flock's ANCHORS: spread deterministically across
+  // the formation, capped at 1.25× their own HP (the plan's anchor ceiling).
+  if (G.objective && !G.objective.marked) {
+    const O = G.objective;
+    O.marked = true;
+    const pool = G.bricks.filter(b => !b.dead && !b.barrier && !b.crosser && !b.friendly
+      && !b.isBoss && !b.subBoss);
+    if (O.type === 'wardbreak' && pool.length) {
+      const sorted = pool.slice().sort((a, b) => a.bx - b.bx || a.by - b.by);
+      const picks = [];
+      for (const idx of [0, Math.floor(sorted.length / 2), sorted.length - 1]) {
+        const b = sorted[Math.max(0, Math.min(sorted.length - 1, idx))];
+        if (b && !picks.includes(b)) picks.push(b);
+      }
+      for (const b of picks) {
+        b.wardSrc = true; b.role = 'anchor';
+        const bump = Math.max(b.hp, Math.round(b.maxHp * 1.25));
+        b.hp = b.maxHp = bump;
+      }
+      O.total = picks.length; O.left = picks.length;
+    }
+    if (O.type === 'lanes') {
+      O.laneX = W / 2; O.laneW = Math.max(130, W * 0.17);
+      O.laneT = 0; O.laneSlot = 1; O.hits = 0;
+    }
+    if (O.type === 'bells') {
+      O.rung = 0; O.dwellT = 0;
+      O.zoneW = Math.max(110, W * 0.15);
+      O.zones = [W * 0.25, W * 0.5, W * 0.75];
+    }
+    if (O.type === 'undercard') { O.crowd = 0; }
+  }
+  // AFT-008: stamp the wave's WORK reference on the ledger record — total
+  // live enemy HP at build, plus the region's Sovereign HP as the
+  // Boss-Equivalent unit (same formula as the finale boss above). Stamped
+  // here, at the END of buildLevel, because the junkie flyer block adds its
+  // population after statsBeginLevel ran.
+  {
+    const L = statsCur();
+    if (L) {
+      let work = 0;
+      for (const b of G.bricks) {
+        if (b.dead || b.barrier || b.crosser || b.friendly) continue;
+        if ((b.hp || 0) >= 900) continue; // unkillable-prop convention — presence, not work
+        work += Math.max(0, b.hp || 0);
+      }
+      L.workHp = work;
+      L.beUnit = Math.max(9, Math.round((19 + rIdx * 9 + cycle * 32) * p.bossHp));
+    }
+  }
   // arriving at a region's doorstep checkpoints the run (post-draft state —
   // buildLevel runs after every pick, and after knockout tree burns too).
   // Level 1 is stage 0 too, but migrateCheckpoint rejects lvl<4 BY DESIGN —
@@ -1586,6 +2000,7 @@ function spawnReinforcement() {
       w: rw * rMul, h: rh * rMul,
       hp, maxHp: hp,
       poke: { id, t },
+      reinf: true, // AFT-008: renewable-population tag — kills of these are ledgered separately
       flash: 0, wobble: gameRand() * Math.PI * 2,
       entry: { t: 0.2 + i * 0.14, dur: 0.9, sx: i % 2 ? -70 : W + 70, sy: -50 - (i % 5) * 24 },
       flight: {
@@ -1648,6 +2063,15 @@ function resetRun(startLevel = 1, trial = false, opts = {}) {
   // on RUN HISTORY — the AFT-018 sim-identity check went flaky because of
   // it. Reset every free-running rand-consuming timer here.
   G.splashCD = 8;
+  // …and the rest of the free-running clock family (found by the AFT-008
+  // baseline's per-frame determinism bisect): G.time feeds boss volley
+  // geometry (rot = G.time * 0.7), and the fire/invuln cooldowns carry the
+  // previous run's tail into a new launch's first frames. Same seed →
+  // identical STREAM means every one of these starts fresh.
+  G.time = 0;
+  G.laserCD = 0; G.blasterCD = 0; G.missileCD = 0; G.invuln = 0; G.seCD = 0;
+  G.enemyShotCD = 6; G.bossShotCD = 4;
+  G.lastChargeT = null; // G.time reset makes stale charge stamps read as fresh
   G.stacks = freshStacks(); G.attackAnim = 0; G.upgradeFx = null;
   // starter partner locks in at run start; its ability tier matches how far
   // into the journey this run begins
@@ -1659,6 +2083,7 @@ function resetRun(startLevel = 1, trial = false, opts = {}) {
   G.encounter = null; G.waveThemeObj = null; G.ending = null; G.guardSwapCD = 8;
   G.blasterTutDone = false; G.rescueCD = 0; G.veilHintCD = 0;
   G.chargedEver = false; G.chargeHintCD = 0; G.gauntlet = null; G.cheated = false;
+  G.finale = null; G.prep = null; // AFT-020 director + preparation state
   G.specVeilTaught = false; // re-teach the veil once per journey
   G.daily = !!opts.daily; G.runSeed = opts.seed || null; G.runStartLevel = startLevel;
   G.runStats = { bricksBroken: 0, bossesDefeated: 0, itemsCaught: 0, damageTaken: 0,
