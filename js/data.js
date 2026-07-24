@@ -316,7 +316,7 @@ const POWERS = {
   // shooter modes have no paddle — `wide` widens the item-collection reach.
   wide:   { key: 'wide',   icon: 'wide',   name: 'WIDE PADDLE',    desc: 'PADDLE GROWS LARGER',        color: '#42a5f5',
     sname: 'WIDE CATCH', sdesc: 'ITEM COLLECTION REACH GROWS' },
-  slow:   { key: 'slow',   icon: 'slow',   name: 'SLOW-MO',        desc: 'EVERYTHING SLOWS DOWN',      color: '#4dd0e1' },
+  slow:   { key: 'slow',   icon: 'slow',   name: 'SLOW-MO',        desc: 'ENEMIES SLOW DOWN — NOT YOUR WEAPON', color: '#4dd0e1' },
   shield: { key: 'shield', icon: 'shield', name: 'SHIELD',         desc: 'BARRIER PROTECTS THE FLOOR', color: '#66bb6a' },
   magnet: { key: 'magnet', icon: 'magnet', name: 'MAGNET',         desc: 'BALLS STICK — FIRE TO AIM',  color: '#ec407a' },
   star:   { key: 'star',   icon: 'star',   name: 'SCORE x2',       desc: 'POINTS ARE DOUBLED',         color: '#ffee58' },
@@ -386,7 +386,10 @@ const STARTER_KIT = {
       '+25% DAMAGE · FASTER FIRE · 35% MEGA · CHAIN EVERY 7',
       '+40% DAMAGE · RAPID FIRE · 50% MEGA · CHAIN 2 EVERY 6',
     ],
-    { damage: [1.15, 1.25, 1.4], megaStart: [0.2, 0.35, 0.5], megaPassive: [0.006, 0.01, 0.015], fireRate: [0.95, 0.9, 0.82], chainEvery: [8, 7, 6], chainTargets: [1, 1, 2] }),
+    // AFT-021 P6: the deliberately-strong pick trims from the measured +45%
+    // over the median vessel toward the ~+25% design band (damage and the
+    // tier-III fire rate; the chain/Mega identity is untouched)
+    { damage: [1.12, 1.2, 1.3], megaStart: [0.2, 0.35, 0.5], megaPassive: [0.006, 0.01, 0.015], fireRate: [0.95, 0.9, 0.82], chainEvery: [8, 7, 6], chainTargets: [1, 1, 2] }),
   grass: starterKit(['+20% DROPS · EXPANDED CATCH', '+35% DROPS · WIDER CATCH', '+50% DROPS · WIDEST CATCH'],
     { drop: [1.2, 1.35, 1.5], catchReach: [16, 22, 28] }),
   ice: starterKit(['EVERY 10 KOS SLOWS TIME 3s', 'EVERY 8 KOS SLOWS TIME 4s', 'EVERY 6 KOS SLOWS TIME 5s'],

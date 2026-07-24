@@ -19,10 +19,27 @@ function paddleW() {
 function classicCoreHalf() {
   return Math.min(paddleW(), G.paddle.w * 0.84) / 2;
 }
-function timeScale() {
-  return (G.fx_slow ? 0.5 : 1) * (G.starterChillT > 0 ? 0.7 : 1)
-    * SETTINGS.speed * (G.dramaticT > 0 ? 0.3 : 1);
-}
+// ── AFT-021 P4: NAMED TIME DOMAINS ─────────────────────────────────────────
+// The same gesture must produce the same weapon timing, always. Four named
+// clocks, each with one job:
+//   settingsScale — the player's explicit global speed choice (Chill/Turbo).
+//     The one domain the WEAPON shares with the world, so charge fill and
+//     bolt travel keep the same ratio at every setting.
+//   hostileScale  — Slow-Mo drops and starter Chill. ENEMIES ONLY: a slow
+//     you earned must never secretly slow your own bolts (the audit's
+//     "charged shots lurch between speeds" finding).
+//   cinematicScale — boss-defeat drama. Visual only; player projectiles
+//     stay unscaled through the beat.
+//   inputNow()    — wall time for tap-vs-hold intent (input.js).
+// timeScale() (world/hostiles) composes all three; weaponScale() is the
+// player weapon clock: charge fill, resonance, overcharge, heat, cadence,
+// and projectile travel all ride it together.
+function settingsScale() { return SETTINGS.speed; }
+function hostileScale() { return (G.fx_slow ? 0.5 : 1) * (G.starterChillT > 0 ? 0.7 : 1); }
+function cinematicScale() { return G.dramaticT > 0 ? 0.3 : 1; }
+function timeScale() { return hostileScale() * settingsScale() * cinematicScale(); }
+function weaponScale() { return settingsScale(); }
+function chargeFillTime() { return upgN('heavy') ? 0.8 : 1.1; } // Heavy Bolt's fast fill is an IDENTITY, cued on the pad
 // Dialga's Roar of Time slows only the balls, not the player
 function ballTimeScale() { return G.timeWarpT > 0 ? 0.55 : 1; }
 // Dialga's TIME DILATION (Milestone 4): ONE shared metronome period drives both
@@ -62,8 +79,19 @@ function tickEffects(dt) {
   if (fighting) for (const k of ['fx_fire', 'fx_laser', 'fx_wide', 'fx_slow', 'fx_magnet', 'fx_score', 'fx_draco']) {
     if (G[k]) { G[k].t -= dt; if (G[k].t <= 0) G[k] = null; }
   }
-  if (G.megaT > 0) G.megaT = Math.max(0, G.megaT - dt);
+  if (G.megaT > 0) {
+    G.megaT = Math.max(0, G.megaT - dt);
+    // AFT-021 P6: SURGE AFTERGLOW — a rank-2+ SURGE build keeps +30% bolt
+    // damage for six seconds after every window closes (the path's bounded
+    // damage conversion: intentional Surge timing extends its own payoff;
+    // the L15 surge probe ran 130s vs the 66s median)
+    if (G.megaT <= 0 && pathLvl('surge') >= 2) {
+      G.afterglowT = 6;
+      addFloater(G.paddle.x, shipY() - 64, lex('MEGA AFTERGLOW'), '#ffd54f', 13);
+    }
+  }
   else if (G.state === 'play') gainMega(dt * starterMod('megaPassive', 0), 'passive');
+  G.afterglowT = Math.max(0, (G.afterglowT || 0) - dt);
   G.starterChillT = Math.max(0, (G.starterChillT || 0) - dt);
   if (G.ballElement && fighting) {
     G.ballElementT -= dt;
@@ -76,15 +104,17 @@ function tickEffects(dt) {
       }
     }
   }
-  // blaster heat cools slowly on its own, faster once fully overheated
+  // blaster heat cools slowly on its own, faster once fully overheated.
+  // AFT-021 P4: heat rides the WEAPON clock so build (per shot, cadence-
+  // driven) and cool keep their ratio at every speed setting.
   if (G.overheat > 0) {
-    G.overheat -= dt;
+    G.overheat -= dt * weaponScale();
     statsCoolTick(dt); // balance report: seconds of weapons-locked downtime
     if (G.overheat <= 0) { G.overheat = 0; G.heat = 0.3; }
   } else {
     // vents on a pause — but slower than sustained fire builds, so holding the
     // trigger (or spamming the charge shot) really can cook the barrel
-    G.heat = Math.max(0, G.heat - dt * (G.mode === 'junkie' ? (preset().heatCool || 0.28) : 0.22));
+    G.heat = Math.max(0, G.heat - dt * weaponScale() * (G.mode === 'junkie' ? (preset().heatCool || 0.28) : 0.22));
   }
   G.gustT = Math.max(0, G.gustT - dt);
   // TIME DILATION metronome (Dialga): a dedicated, deterministic accumulator so
@@ -186,6 +216,7 @@ function nextEnemyVolley() {
 function enemyShotClass(key) { return SHOT_CLASSES[key] || SHOT_CLASSES.standard; }
 function spawnEnemyShot(opts = {}) {
   if (G.mode === 'classic') return null; // BREAKER is calm — no enemy fire ever
+  if (!combatIsLive()) return null; // AFT-021 P1: hostile fire exists only in live combat
   if (G.enemyShots.length >= 140) return null; // mobile-safe hard ceiling
   const classKey = opts.classKey || (opts.heavy ? 'heavy' : 'standard');
   const C = enemyShotClass(classKey);
@@ -695,7 +726,10 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
     if (qualified) {
       br.riteHits = (br.riteHits || 0) + 1;
       br.flash = 1;
-      const need = br.riteKind === 'root' ? 3 : 2;
+      // AFT-021 P5: the rite IS the encounter's work — shooter modes (whose
+      // fire can play the windows deliberately) answer more strikes per
+      // totem; classic keeps the short count (a ball cannot time windows)
+      const need = (br.riteKind === 'root' ? 3 : 2) + (G.mode !== 'classic' ? 5 : 0);
       if (br.riteHits >= need) { riteMark(br); return; }
       addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 12,
         'RITE ' + br.riteHits + '/' + need, '#5affc3', 11);
@@ -809,7 +843,11 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
     const HG = G.finale.hourglass;
     if (HG.awakened > 0) {
       if (!hourglassRinging()) {
-        dmg *= 0.15;
+        // AFT-021 P5: the blind-play floor rises 0.15 → 0.32 — un-synced
+        // fire shows honest progress while a rung window stays ≈3× better
+        // (the measured 60-second silent tail on the lone Regent). The BALL
+        // cannot time windows at all, so classic's floor sits higher.
+        dmg *= G.mode === 'classic' ? 0.5 : 0.32;
         if (HG.silentCD <= 0) {
           HG.silentCD = 1.2;
           addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 14,
@@ -1020,7 +1058,12 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
     }
     if (G.objective && G.objective.type === 'undercard' && !G.objective.done && !br.crosser && !br.friendly) {
       const O2 = G.objective;
-      O2.crowd = Math.min(1, (O2.crowd || 0) + 0.055 + (G.combo >= 5 ? 0.02 : 0));
+      // AFT-021 P5: the crowd wants a SHOW, not a speedrun — smaller per-kill
+      // pops under a 0.09/s rate ceiling put the undercard at ~15-20s of
+      // sustained rhythm instead of one 8-second AoE dump
+      if (O2.t0 == null) O2.t0 = G.time;
+      const crowdCeil = 0.05 * Math.max(0.5, G.time - O2.t0);
+      O2.crowd = Math.min(1, Math.min((O2.crowd || 0) + 0.03 + (G.combo >= 5 ? 0.012 : 0), crowdCeil));
       O2.progress = O2.crowd;
       if (O2.crowd >= 1) completeNonAttrition(O2, O2.name || 'THE CROWD ROARS');
     }
@@ -1060,7 +1103,9 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
       const chillEvery = starterMod('chillEvery', 0);
       if (chillEvery && G.starterKOs % chillEvery === 0) {
         G.starterChillT = Math.max(G.starterChillT, starterMod('chillDur', 3));
-        setAnnounce('ice', '#4dd0e1', 'SNOW WARNING!', 'THE BATTLE SLOWS DOWN', 1.8);
+        // AFT-021 P4: the slow is a buff on ENEMIES — say so, so the weapon
+        // keeping its speed never reads as a bug
+        setAnnounce('ice', '#4dd0e1', 'SNOW WARNING!', 'ENEMIES SLOWED — YOUR WEAPON HOLDS SPEED', 1.8);
       }
       const swarmEvery = starterMod('swarmEvery', 0);
       if (swarmEvery && G.starterKOs % swarmEvery === 0) {
@@ -1089,9 +1134,7 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
       const need = Math.max(9, 25 - 4 * (stackN('halo') - 1));
       if (G.haloKills >= need) {
         G.haloKills = 0;
-        if (G.shieldCharges < shieldCap()) {
-          G.shieldCharges++;
-          statsShieldGain('halo');
+        if (tryShieldGain('halo')) {
           addFloater(G.paddle.x, shipY() - 30, 'HALO WARD +1', '#fff59d', 12);
           SFX.power();
         }
@@ -2323,7 +2366,10 @@ function absorbHit(x, y, shotType = null, volleyId = null) {
 // ride Math.random through sparkle/ringFx only.
 function relicAllowed() { return upgN('fortune') ? 2 : 1; } // TWIN ORBIT
 function relicCadence() { // VOLLEY synergy: a deep arsenal speeds the loop
-  return G.mode === 'classic' ? 6 : (pathLvl('arsenal') >= 3 ? 3 : 4);
+  // AFT-021 P6: the returning-relic identity keeps its rhythm but the proc
+  // cadence eases one notch (measured 40% tempo dominance over the median
+  // path at L15) — every 5th attack, every 4th with a deep arsenal
+  return G.mode === 'classic' ? 6 : (pathLvl('arsenal') >= 3 ? 4 : 5);
 }
 function relicPower(back) {
   let d = 1.6 * (1 + 0.15 * pathLvl('impact')) * starterMod('power', 1); // IMPACT: heavier outward hit
@@ -2376,8 +2422,8 @@ function updateRelics(dt) {
   if (!G.relics.length) return;
   const ts = G.megaT > 0 ? 1.5 : 1; // SURGE synergy: overdrive spins the orbit faster
   for (const R of G.relics) {
-    R.t += dt * ts;
-    R.spin += dt * ts * 9;
+    R.t += dt * weaponScale(); // AFT-021 P4: the relic is a player weapon — weapon clock
+    R.spin += dt * weaponScale() * 9;
     const k = Math.min(1, R.t / R.dur);
     const e = k * k * (3 - 2 * k);
     R.px = R.x; R.py = R.y;
@@ -2445,9 +2491,7 @@ function webRelicProcs(ev) {
   } else if (ev === 'return') {
     if (upgN('rescue') && ++G.rescueN >= 6) {
       G.rescueN = 0;
-      if (G.shieldCharges < shieldCap()) {
-        G.shieldCharges++;
-        statsShieldGain('rescue');
+      if (tryShieldGain('rescue')) {
         ringFx(G.paddle.x, shipY(), '#ff8a80', 5, 54, 3, 0.4);
         addFloater(G.paddle.x, shipY() - 34, 'WARDING ORBIT!', '#ff8a80', 12);
         SFX.shield();
@@ -2653,8 +2697,7 @@ function celestialSector(k) {
       damageBrick(br, 1, br.bx + G.fx, br.by + G.fy, el, { noMega: true });
     }
   }
-  if (G.shieldCharges < shieldCap()) { G.shieldCharges++; statsShieldGain('fusion'); }
-  else if (G.lives < Math.max(1, G.livesMax)) { G.lives++; G.hurtHud = 2.6; statsLifeGain('fusion'); }
+  if (!tryShieldGain('fusion') && G.lives < Math.max(1, G.livesMax)) { G.lives++; G.hurtHud = 2.6; statsLifeGain('fusion'); }
   G.ballElement = el;
   G.ballElementT = Math.max(G.ballElementT, 4);
   G.resistStreak = 0;
@@ -2689,6 +2732,12 @@ function finalizeRun() {
 // shot: the enemy-shot object that landed (when one did) — carries the
 // kind/class/type/species family data the balance report attributes hits to
 function loseLife(cause = 'MISSED BALL', shot = null) {
+  // AFT-021 P1 — the combat-state safety contract: NOTHING can cost a life
+  // outside live combat. A stray projectile surviving into the resolution
+  // beat, a strike landing behind a results panel, a collision branch missed
+  // by a state check — all dead-end here. This is the one gate the property
+  // test drives through every non-combat state.
+  if (!combatIsLive()) return;
   const dodge = starterMod('dodge', 0);
   if (dodge && gameRand() < dodge) {
     G.invuln = Math.max(G.invuln, 1.1);
@@ -2715,6 +2764,7 @@ function loseLife(cause = 'MISSED BALL', shot = null) {
     return;
   }
   G.lastDamageCause = cause;
+  a11yAnnounce('Hit — ' + Math.max(0, G.lives - 1) + ' of ' + Math.max(1, G.livesMax) + ' health left', true); // AFT-021 P8
   if (G.runStats) G.runStats.damageTaken++;
   statsDamageIn(cause, shot);
   haptic('damage');
@@ -3558,6 +3608,23 @@ function relayVowHit(br, dmg, sx, sy, meta) {
   const F = G.finale, R = F.relay;
   br.flash = 1; // keeps the pierce i-frame honest
   if (br !== relayCarrierBrick()) {
+    // BREAKER adapter (AFT-021 P5): the ball cannot CHOOSE its target the
+    // way a gun can — a non-carrier ball hit is carried on the wind into the
+    // pass at 40% credit instead of vanishing (the measured 10-minute relay).
+    // Aiming rallies at the carrier is still the efficient line; the rule
+    // itself is unchanged in the shooter modes.
+    if (G.mode === 'classic') {
+      const carried = dmg * 0.55;
+      statsDmgOut(meta.source || 'other', carried);
+      R.dealt += carried;
+      F.meter.value = R.passes + Math.min(1, R.dealt / R.passHp);
+      if ((R.deflectCD || 0) <= 0) {
+        R.deflectCD = 0.8;
+        addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 12, 'CARRIED ON THE WIND', '#80d8ff', 11);
+      }
+      if (R.dealt >= R.passHp) relayCompletePass();
+      return;
+    }
     // turned by the wind — a readable "not the target" cue, throttled
     if ((R.deflectCD || 0) <= 0) {
       R.deflectCD = 0.8;
@@ -3626,6 +3693,17 @@ function relayBeginCoda(gen2) {
   const mid = gen2.gauntlet && gen2.gauntlet.myth;
   F.coda = { t: 0, dur: 14, spawned: 0, blooms: 6 };
   F.codaHold = true;
+  // AFT-021 P5: the coda is a REWARD LAP — any ordinary leftovers stand
+  // down with the storm (a classic wall fragment once marched off-screen
+  // and held the finale hostage for ten minutes)
+  for (const b of G.bricks) {
+    if (b.dead || b.isBoss || b.subBoss || b.crosser || b.friendly || b.barrier) continue;
+    if (G.mode === 'classic') { shatterBrick(b, b.bx + G.fx, b.by + G.fy, bareMon(b)); b.dead = true; }
+    else if (b.flight || b.dive || b.bare) {
+      b.flight = null; b.dive = null; b.bare = true;
+      b.crosser = { vx: ((b.bx + G.fx) < W / 2 ? -1 : 1) * Math.max(150, W * 0.2), bobPh: Math.random() * 6 };
+    }
+  }
   if (mid) {
     // the Hourseed drifts serenely across the healed sky — present, never hostile
     const vw2 = Math.min(120, W * 0.16);
@@ -3893,7 +3971,11 @@ function chaseChooseRoute(br) {
   const F = G.finale, C = F.chase;
   C.chosen = br.subIdx || 0;
   br.vesselRoute = true;
-  br.hp = br.maxHp = Math.max(3, Math.round((G.gauntlet ? G.gauntlet.legendHp : 20) * 0.3));
+  // AFT-021 P5: the walled modes shoot the RUNNING vessel from the floor —
+  // their hit windows are a fraction of the flying pilot's, so the road is
+  // proportionally shorter (measured: a 580s blaster route stall)
+  const routeMul = G.mode === 'junkie' ? 0.3 : G.mode === 'blaster' ? 0.10 : 0.26;
+  br.hp = br.maxHp = Math.max(3, Math.round((G.gauntlet ? G.gauntlet.legendHp : 20) * routeMul));
   F.meter = { value: 0, max: 1, label: (br.poke.n || 'THE ROUTE').toUpperCase() };
   for (const b of G.bricks) {
     if (!b.vessel || b === br || b.dead) continue;
@@ -3988,6 +4070,21 @@ function chaseLink(boss) {
     null, null, false, true, 'boss');
 }
 function updateChase(dt) {
+  // AFT-021 P5: the WALLED modes cannot chase — if the floor turret/paddle
+  // has not run the road down in 40s, the road YIELDS (the no-hostage rule;
+  // the beat advances with no mastery credit). The flying pilot keeps the
+  // full pursuit.
+  {
+    const F0 = G.finale, C0 = F0 && F0.chase;
+    if (C0 && F0.beat === 0 && C0.chosen != null && G.mode !== 'junkie' && F0.beatT > 40) {
+      const duel = G.bricks.find(b => b.vesselRoute && !b.dead);
+      if (duel) {
+        setCombatNotice(chaseWord('routeWord', 'THE ROAD YIELDS'), '#ffcf5e', 2);
+        duel.hp = 0.5;
+        damageBrick(duel, 2, duel.bx + G.fx, duel.by + G.fy, null, { source: 'other', noMega: true });
+      }
+    }
+  }
   const F = G.finale, C = F.chase;
   if (F.beat === 0 && C.chosen != null && F.meter) {
     const duel = G.bricks.find(b => b.vesselRoute && !b.dead);
@@ -4910,7 +5007,7 @@ function update(dt) {
     G.shipYv += (ty - G.shipYv) * Math.min(1, dt * 14 * follow);
   } else G.shipYv = PADDLE_Y();
   G.invuln = Math.max(0, G.invuln - dt);
-  G.blasterCD = Math.max(0, G.blasterCD - dt);
+  G.blasterCD = Math.max(0, G.blasterCD - dt * weaponScale()); // AFT-021 P4: fire cadence rides the weapon clock
   G.muzzle = Math.max(0, G.muzzle - dt);
   G.wingFloatT = Math.max(0, (G.wingFloatT || 0) - dt); // wing-deflect floater throttle
   G.shieldFlash = Math.max(0, (G.shieldFlash || 0) - dt * 3); // shield-bubble flare after an absorb
@@ -4921,8 +5018,12 @@ function update(dt) {
   if (G.uiTouchPulse) { G.uiTouchPulse.t -= dt; if (G.uiTouchPulse.t <= 0) G.uiTouchPulse = null; }
   G.shareToast = Math.max(0, (G.shareToast || 0) - dt);
   if (G.combatNotice) {
-    G.combatNotice.t -= dt;
-    if (G.combatNotice.t <= 0) G.combatNotice = null;
+    // AFT-021 P2: the notice's clock pauses while an announcement owns the
+    // transient lane — it shows AFTER, never stacked on top
+    if (!G.announce) {
+      G.combatNotice.t -= dt;
+      if (G.combatNotice.t <= 0) G.combatNotice = null;
+    } else if (G.combatNotice.t > 2.2) G.combatNotice.t = 2.2; // never hoard a stale queue
   }
   updateAmbient(dt, G.state === 'menu' || G.state === 'dex' ? 0 : regionIdx(G.level));
 
@@ -4984,6 +5085,7 @@ function update(dt) {
   }
   if (G.state === 'menu' || G.state === 'gameover' || G.state === 'dex') return;
   if (paused) return;
+  if (G.state === 'resolve') { updateResolve(dt); return; } // AFT-021 P1: the harmless post-win beat
   if (G.state === 'results') return; // static interstitial: no simulation
   if (G.state === 'upgrade') {
     // no draftable upgrades left → brief breather, then straight on
@@ -5023,6 +5125,20 @@ function update(dt) {
 
   tickEffects(dt);
   if (G.state === 'play') { G.playT += dt; statsPlayTick(dt); }
+  // AFT-021 P2: the trial/daily BRIEFING HOLD — while it runs, every hostile
+  // clock is floored (no fire, no dives, no maneuvers; formations still fly)
+  // and when it ends the trial notice retires so copy never sits over live
+  // combat. Cooldown clamps only: the seeded RNG stream is untouched.
+  if (G.engageHold > 0 && G.state === 'play') {
+    G.engageHold -= dt;
+    G.enemyShotCD = Math.max(G.enemyShotCD, 0.9);
+    G.bossShotCD = Math.max(G.bossShotCD, 0.9);
+    G.diveCD = Math.max(G.diveCD, 0.9);
+    G.maneuverCD = Math.max(G.maneuverCD, 0.9);
+    if (G.engageHold <= 0 && G.announce && G.announce.kind === 'trial') {
+      G.announce.t = Math.min(G.announce.t, 0.01); // retire — combat begins
+    }
+  }
   // AFT-008 clock classifier: one cheap pass per frame — does a damageable
   // target or live objective exist (MEANINGFUL PROGRESS), and is hostile
   // threat live (ACTIVE THREAT)? Reveals freeze combat, so neither clock
@@ -5048,7 +5164,7 @@ function update(dt) {
   // ---- shooter modes (BLASTER / SPACE JUNKIE): hold FIRE to build a heavy
   // shot, release to fire. While a hold is pending or charging, normal fire
   // pauses so no stray bolt leaks out before the charged shot.
-  G.chargeCD = Math.max(0, G.chargeCD - dt);
+  G.chargeCD = Math.max(0, G.chargeCD - dt * weaponScale()); // AFT-021 P4: weapon clock
   let charging = false, chargedThisFrame = false;
   // CLASSIC joins the charge arc whenever its blaster is ARMED (laser
   // window, Mega, or an offense capstone) — the full Starfighter grammar:
@@ -5056,22 +5172,35 @@ function update(dt) {
   if ((G.mode !== 'classic' || blasterArmed()) && G.state === 'play') {
     // A FIRE touch still down past the intent threshold promotes into a charge;
     // a quicker release is dispatched as one normal shot by input.js.
-    if (touchFirePendingId !== null && performance.now() - touchFirePendingT >= TOUCH_CHARGE_HOLD_MS) {
+    if (touchFirePendingId !== null && inputNow() - touchFirePendingT >= TOUCH_CHARGE_HOLD_MS) {
+      const heldMs = inputNow() - touchFirePendingT;
       chargeHeld = true; chargeTouchId = touchFirePendingId; touchFirePendingId = null;
+      // AFT-021 P4: the charge arc measures from the PRESS — the promoted
+      // hold credits its elapsed intent window instead of starting at zero,
+      // so touch and desktop reach full charge in the same time.
+      G.charge = Math.max(G.charge, Math.min(1, (heldMs / 1000) * weaponScale() / chargeFillTime()));
+      G.chargeCur = { pressMs: +heldMs.toFixed(1), t0: G.time, fullS: null };
+      haptic('promote'); // AFT-021 P8: the hold has become a charge — say so in the thumb
     }
     if (chargeHeld && G.overheat <= 0 && G.chargeCD <= 0) {
       charging = true;
-      // COOLANT's shooter translation: a cooler barrel also charges faster
-      G.charge = Math.min(1, G.charge + dt / (upgN('heavy') ? 0.8 : 1.1)); // ~1.1s to full (0.8 w/ Heavy Bolt — IMPACT owns charge)
+      // COOLANT's shooter translation: a cooler barrel also charges faster.
+      // AFT-021 P4: fill rides the WEAPON clock — the ratio between charge
+      // time and bolt travel is constant at every speed setting.
+      G.charge = Math.min(1, G.charge + dt * weaponScale() / chargeFillTime()); // ~1.1s to full (0.8 w/ Heavy Bolt — IMPACT owns charge)
+      if (G.charge >= 1 && G.chargeCur && G.chargeCur.fullS == null) {
+        G.chargeCur.fullS = +(((G.chargeCur.pressMs || 0) / 1000) + (G.time - G.chargeCur.t0)).toFixed(3);
+        haptic('full'); // the resonance window opens NOW
+      }
       // RESONANCE (Milestone 2): the instant the charge tops out, a short
       // sweet-spot window opens (RESONANCE_WINDOW) — release inside it for
       // the resonant shot. Sitting on a full charge past ~1.4s OVERCHARGES:
       // the barrel slowly cooks, so hoarding the big shot has a real cost.
       if (G.charge >= 1) {
-        G.chargeFullT += dt;
+        G.chargeFullT += dt * weaponScale();
         // must OUTPACE passive cooling (~0.28/s) or hoarding is free —
         // net ≈ +0.12 heat/s: gentle, but a hot barrel will tip over
-        if (G.chargeFullT > 1.4) addWeaponHeat(dt * 0.4);
+        if (G.chargeFullT > 1.4) addWeaponHeat(dt * weaponScale() * 0.4);
       }
     } else if (G.charge > 0) {
       fireCharge(G.charge, G.chargeFullT > 0 && G.chargeFullT <= RESONANCE_WINDOW);
@@ -5098,14 +5227,14 @@ function update(dt) {
       if (G.shieldRegenT <= 0) {
         G.shieldRegenT = 10;
         G.shieldRegenN = (G.shieldRegenN || 0) + 1;
-        G.shieldCharges++;
-        SFX.shield();
-        // capstone proc reads on the SHIP, not just as text: the bubble
-        // flares green and a ring blooms outward as the charge regrows
-        G.shieldFlash = Math.max(G.shieldFlash || 0, 0.8);
-        statsShieldGain('regen');
-        ringFx(G.paddle.x, shipY(), '#66bb6a', 6, 52, 3, 0.4);
-        addFloater(G.paddle.x, shipY() - 30, 'SUPER SHIELD +1', '#66bb6a', 12);
+        if (tryShieldGain('regen')) { // AFT-021 P7: even the capstone rides the income budget
+          SFX.shield();
+          // capstone proc reads on the SHIP, not just as text: the bubble
+          // flares green and a ring blooms outward as the charge regrows
+          G.shieldFlash = Math.max(G.shieldFlash || 0, 0.8);
+          ringFx(G.paddle.x, shipY(), '#66bb6a', 6, 52, 3, 0.4);
+          addFloater(G.paddle.x, shipY() - 30, 'SUPER SHIELD +1', '#66bb6a', 12);
+        }
       }
     } else G.shieldRegenT = 10;
   }
@@ -5886,7 +6015,18 @@ function update(dt) {
       }
     }
     let lowest = -Infinity;
-    for (const br of G.bricks) if (!br.dead && !br.dive && !flying(br)) lowest = Math.max(lowest, br.by + G.fy + br.h / 2);
+    // AFT-021 P9 (playtest find): STARFIGHTER has no descending wall — its
+    // finale actors that hold station without a flight slot (raid captains
+    // row −2, props row ≤ −3, the bound mythic) are formations, and on a
+    // 375-tall landscape they sat "past the line" forever, spamming
+    // warnings and taking phantom lives. The walled modes keep the full
+    // check: their bosses and sentinels genuinely march.
+    for (const br of G.bricks) {
+      if (br.dead || br.dive || flying(br)) continue;
+      if (br.crosser || br.friendly || br.stoodDown || br.gridTerminal) continue;
+      if (G.mode === 'junkie' && br.row < 0) continue;
+      lowest = Math.max(lowest, br.by + G.fy + br.h / 2);
+    }
     if (lowest > DANGER_Y()) {
       G.fy -= G.brickH * 3.5;
       if (!G.dangerWarned) { // first crossing per wave is a free warning
@@ -5903,6 +6043,30 @@ function update(dt) {
   }
 
   // every system that writes positions has run — settle the sprite kinematics
+  // AFT-021 P3: bosses, sentinels and mythics live inside the COMBAT-SAFE
+  // viewport, not raw W×H — the fight can never sit under the HUD bar or
+  // the goal-pill band (the 375-tall landscape audit finding). Applied
+  // after all motion each frame, so authored patterns keep their shape and
+  // simply ride a floored ceiling. Entrances/reveal flights are exempt
+  // (they may sweep in from anywhere; the clamp owns them once they land).
+  if ((G.state === 'play' || G.state === 'serve') && typeof combatSafeRect === 'function') {
+    const safeTop = combatSafeRect().y0;
+    for (const br of G.bricks) {
+      if (br.dead || br.dormant || br.crosser) continue;
+      if (!(br.isBoss || br.subBoss || br.mythic || br.secretBoss)) continue;
+      if (br.gauntletEntering || br.entry || (br.flight && br.flight.entering)) continue;
+      const minY = safeTop - G.fy + br.h * 0.5;
+      if (br.by < minY) br.by = minY;
+      // …and the X axis: an authored sweep may leave the screen, but a
+      // boss-class actor can never SETTLE off it (a measured hourglass
+      // Regent drifted to x = −161 and held its hp for ten minutes)
+      const sr = combatSafeRect();
+      const minX = sr.x0 - G.fx + br.w * 0.4, maxX = sr.x1 - G.fx - br.w * 0.4;
+      if (br.hx != null) br.hx = Math.max(minX, Math.min(maxX, br.hx));
+      if (br.bx < minX - 90) br.bx = minX - 90;
+      else if (br.bx > maxX + 90) br.bx = maxX + 90;
+    }
+  }
   if (G.state === 'play' || G.state === 'serve') updateSpriteKinematics(dt * ts);
 
   // ---- balls ----
@@ -6093,9 +6257,7 @@ function update(dt) {
         } else if (G.starter === 'water') { // Torrent: rhythm builds a shield
           if (++G.torrentCount >= 6 - G.starterLvl) {
             G.torrentCount = 0;
-            if (G.shieldCharges < shieldCap()) {
-              G.shieldCharges++;
-              statsShieldGain('torrent');
+            if (tryShieldGain('torrent')) {
               addFloater(G.paddle.x, py - 34, 'TORRENT SHIELD!', '#4dd0e1', 13);
               SFX.shield();
             }
@@ -6149,7 +6311,7 @@ function update(dt) {
           if (ox < oy) { b.vx = b.x < bx ? -Math.abs(b.vx) : Math.abs(b.vx); }
           else { b.vy = b.y < by ? -Math.abs(b.vy) : Math.abs(b.vy); }
           // Blaze embers from the last paddle return add burn damage
-          let dmg = pierce ? megaBallDmg() : 1; // journey + SURGE-rank scaled overdrive
+          let dmg = (pierce ? megaBallDmg() : 1) * journeyDmgMul(); // AFT-021 P6: the ball matures with the journey too
           if (b.ember > 0) {
             b.ember--;
             dmg += G.starterLvl >= 3 ? 2 : 1;
@@ -6211,7 +6373,9 @@ function update(dt) {
     }
   }
   for (const L of G.lasers) {
-    L.y -= 900 * ts * dt;
+    // AFT-021 P4: player bolts ride the WEAPON clock — hostile slows and
+    // cinematic beats never touch their travel
+    L.y -= 900 * weaponScale() * dt;
     // TAILWIND CURRENT (Lugia): the pilot's bolts drift downwind in shooter
     // modes — aim upwind to hit. Accumulates a lateral vx, integrated below.
     if (G.mode !== 'classic' && G.gustT > 0 && G.gustDir) L.vx = (L.vx || 0) + G.gustDir * 150 * dt;
@@ -6276,6 +6440,11 @@ function update(dt) {
     for (const br of G.bricks) {
       if (br.dead || br.phaseT > 0 || L.dead || L.lastHit === br) continue;
       if (br.friendly) continue; // player fire PASSES THROUGH protect allies — no damage, no pierce spent, no lastHit
+      // AFT-021 P5: NEUTRAL SCENERY never shadows a real target — bolts pass
+      // through sealed chase vessels, the still-bound raid mythic, and
+      // stood-down actors exactly like allies (measured: a sealed 999-hp
+      // vessel parked in front of the Sovereign ate every bolt for 600s)
+      if (br.vesselSealed || (br.raidBound && !br.raidFreed) || br.stoodDown) continue;
       const bx = br.bx + G.fx, by = br.by + G.fy;
       // charged shots are fat, so they connect over a wider span
       const xtol = br.w / 2 + (L.charged ? L.r * 0.5 : 0) + (L.heavy ? 6 : 0);
@@ -6341,7 +6510,8 @@ function update(dt) {
         } else {
           L.dead = true;
         }
-        let dmg = L.charged ? L.power : (L.powerMul || 1);
+        let dmg = (L.charged ? L.power : (L.powerMul || 1)) * journeyDmgMul(); // AFT-021 P6: baseline growth
+        if (G.afterglowT > 0 && !L.charged) dmg *= 1.3; // SURGE AFTERGLOW (P6)
         if (L.heavy) dmg *= 1.15;
         if (L.nova) dmg *= 2;
         if (L.calib) dmg *= 1.6; // CALIBRATED BARRAGE: primed volley
@@ -6437,7 +6607,7 @@ function update(dt) {
       const sp = 430;
       m.vx = Math.cos(na) * sp; m.vy = Math.sin(na) * sp;
     }
-    m.x += m.vx * ts * dt; m.y += m.vy * ts * dt;
+    m.x += m.vx * weaponScale() * dt; m.y += m.vy * weaponScale() * dt; // AFT-021 P4: weapon clock
     if (G.particles.length < 430) G.particles.push({ x: m.x, y: m.y, vx: -m.vx * 0.08, vy: -m.vy * 0.08, life: 0.3, maxLife: 0.3, color: m.drone ? '#ea80fc' : '#ffab91', r: 2.5 });
     if (shotTgt && !shotTgt.dead && Math.hypot(shotTgt.x - m.x, shotTgt.y - m.y) < 18) {
       // drone intercept: the shot dies to a hex flash, never reaching you
@@ -6727,7 +6897,13 @@ function update(dt) {
       if (G.enemyShotCD <= 0) {
         G.enemyShotCD = G.mode === 'junkie'
           ? d.starShotInt * (0.85 + gameRand() * 0.3)
-          : d.enemyShotInt * (0.7 + gameRand() * 0.6) * (blaster ? 0.5 : 1);
+          // AFT-021 P7: BLASTER's cadence eases from the old flat ×0.5 — the
+          // doubled fire over long wall fights was the measured knockout
+          // engine (20 landed heavies in one L6 finale). It opens gentler
+          // and tightens across the journey; pressure stays well above
+          // classic at every realm.
+          : d.enemyShotInt * (0.7 + gameRand() * 0.6)
+            * (regionIdx(G.level) <= 1 ? 0.85 : regionIdx(G.level) <= 3 ? 0.8 : 0.72);
         // off-screen flyers (wrapping patterns / streams) can't fire
         const alive = G.bricks.filter(b => !b.dead && !b.isBoss && !b.subBoss && !b.entry && !b.dive
           && !b.barrier && !b.dormant && !b.crosser && !b.friendly
@@ -6743,7 +6919,11 @@ function update(dt) {
         // Ball play needs readable lanes; sustained cadence stays, walls don't.
         const classicWall = G.mode === 'classic'
           && G.enemyShots.reduce((n, s) => n + (!s.dead && !s.boss ? 1 : 0), 0) >= 8;
-        if (alive.length && activeTel < (blaster ? 5 : 3) && !classicWall) {
+        // AFT-021 P7: BLASTER caps concurrent wave telegraphs at 3 (was 5) —
+        // the floor-bound paddle was eating converging aimed-heavy fans from
+        // four elites at once (30+ landed heavies in one siege finale).
+        // Junkie keeps 5 (its threat budget governs separately).
+        if (alive.length && activeTel < (G.mode === 'blaster' ? 3 : blaster ? 5 : 3) && !classicWall) {
           const shooter = alive[Math.floor(gameRand() * alive.length)];
           if (G.mode === 'junkie') {
             const pattern = starEnemyPattern(shooter);
@@ -6821,8 +7001,9 @@ function update(dt) {
       // a phantom paddle width (same rule as enemy shots). Classic clips the
       // fixed DAMAGE CORE (never the widened wings), blaster its base width —
       // a warned beam lane must always leave a reachable escape.
-      const halfW = G.mode === 'junkie' ? 26
-        : G.mode === 'classic' ? classicCoreHalf() : G.paddle.w / 2;
+      // AFT-021 P7: blaster rides the same DEFLECTOR-CORE rule as classic —
+      // a warned beam clips the fixed core, never the widened wings
+      const halfW = G.mode === 'junkie' ? 26 : classicCoreHalf();
       if (G.invuln <= 0 && Math.abs(G.paddle.x - cs.x) < cs.w / 2 + halfW) {
         cs.strike = 0;
         if (absorbHit(G.paddle.x, shipY())) continue;
@@ -7051,7 +7232,11 @@ function update(dt) {
     // (classicCoreHalf — width mods never grow it); the wings outside it
     // are deflector armor handled just before the damage branch below.
     const hitR = s.hitR || (s.heavy ? 14 : 8);
-    const hitW = (jk ? 13 : (G.mode === 'classic' ? classicCoreHalf() : G.paddle.w / 2) + 4) + hitR;
+    // AFT-021 P7: BLASTER shares classic's DEFLECTOR-CORE rule — only the
+    // fixed core around the hull's center is vulnerable; the wings beyond it
+    // deflect strays (below). The full-width hurtbox made every long wall
+    // fight a war of attrition the paddle could not win.
+    const hitW = (jk ? 13 : classicCoreHalf() + 4) + hitR;
     const hitH = (jk ? 12 : G.paddle.h / 2 + 4) + hitR;
     // PROTECT OBJECTIVE: enemy fire can strike the friendly. This narrow check
     // runs ONLY while a live friendly exists — a shot inside its hitR is
@@ -7100,7 +7285,7 @@ function update(dt) {
     // makes every width upgrade a pure upgrade: more ball reach, more armor,
     // same small kill zone. Aimed elite/boss fire still targets your center,
     // so the counterplay (move the CORE) is untouched.
-    if (!s.dead && G.mode === 'classic' && s.y > py - hitH && s.y < py + hitH) {
+    if (!s.dead && G.mode !== 'junkie' && s.y > py - hitH && s.y < py + hitH) {
       const dx = Math.abs(s.x - G.paddle.x);
       const wingHalf = paddleW() / 2 + 4 + hitR;
       if (dx >= hitW && dx < wingHalf) {
@@ -7177,55 +7362,20 @@ function update(dt) {
   }
   compactInPlace(G.enemyShots, s => !s.dead);
 
-  for (const pu of G.powerups) {
-    pu.y += pu.vy * ts * dt; pu.rot += dt * 3;
-    if (pu.orb) pu.x += Math.sin(pu.rot * 0.9) * 26 * dt; // orbs waft down gently
-    if (pu.secretShard) {
-      pu.secretT -= dt;
-      if (pu.swift) {
-        // classic's ONE-PASS shard: fast, swaying, never homing — get the
-        // paddle under it or the rift closes when it drops past the floor
-        pu.x += Math.sin(pu.rot * 1.35) * 46 * dt;
-      } else {
-        // a shard freed from a downed courier is generous: the shoot-down was
-        // the test, so this catch bends toward the player on a long window
-        pu.x += (G.paddle.x - pu.x) * Math.min(1, dt * 2.6);
-        pu.vy = pu.y > shipY() - 120 ? 48 : 72;
-      }
-    }
-    { // AFT-007: the item magnet is BASELINE phone QoL now — every build gets
-      // the drift (the old `magnetize` key is the RELIC GLAIVE weapon tier)
-      const dx = G.paddle.x - pu.x;
-      pu.x += Math.sign(dx) * Math.min(Math.abs(dx) * 2, 60) * dt;
-    }
-    const pw = paddleW(), py = shipY(); // the ship catches wherever it flies
-    // Overgrowth widens the pickup catch envelope at each evolution.
-    const reach = 18 + starterMod('catchReach', 0);
-    if (pu.y > py - 20 && pu.y < py + 24 && Math.abs(pu.x - G.paddle.x) < pw / 2 + reach) {
-      pu.dead = true;
-      collectPickup(pu);
-    }
-    if (!pu.dead && pu.secretShard && (pu.secretT <= 0 || pu.y > H + 30)) {
-      pu.dead = true;
-      if (G.secret.pendingShard === pu.shardIndex) G.secret.pendingShard = null;
-      setAnnounce('alert', '#78909c', 'THE RIFT CLOSED',
-        'SHARD ' + (pu.shardIndex + 1) + '/3 WAS LEFT BEHIND', 2.5,
-        SKIN.secret.missWarn || 'MISS ANY PIECE AND THE NORMAL FINALE REMAINS');
-    } else if (!pu.dead && pu.y > H + 30) pu.dead = true;
-  }
-  compactInPlace(G.powerups, p => !p.dead);
+  // AFT-021 P1: extracted into advancePickups so the RESOLUTION beat can keep
+  // the fair catch window alive after combat ends.
+  advancePickups(dt, ts);
 
-  // ---- level clear → reinforcements first, then draft and move on ----
+  // ---- level clear → reinforcements first, then the RESOLUTION beat, then
+  // results (AFT-021 P1). The screen must visibly resolve the completion verb
+  // — defeat, dispersal, rescue, stand-down — before any panel appears, and
+  // nothing may damage the player once the win condition is met.
   if (G.state === 'play' && G.dramaticT <= 0 && !(G.finale && G.finale.codaHold)
     && G.bricks.every(b => b.dead || b.barrier || b.crosser || b.friendly || b.gridTerminal)) {
     // an active objective holds the wave open — SURVIVE outlasts the timer,
     // ESCORT/DEFEND protects the friendly. A FAILED objective releases the
     // wave to a normal attrition clear (losing the bonus is the only cost).
     if (G.objective && !G.objective.done && !G.objective.failed) return;
-    // FALLING ITEMS hold it open too (owner request, 2026-07-23): a drop
-    // earned on the kill shot must be catchable — the stage waits until
-    // every pickup is caught or falls off-screen (gravity bounds the wait)
-    if (G.powerups.length) return;
     // the enemies are gone — any ROCK TOMB barriers crumble on their own
     for (const b of G.bricks) if (!b.dead && b.barrier) { b.dead = true; burst(b.bx + G.fx, b.by + G.fy, '#a1887f', 12, 180, 0.5); }
     if (G.reinforce > 0) {
@@ -7244,19 +7394,126 @@ function update(dt) {
       return;
     }
     if (G.secret.pendingShard != null) return;
+    // The win is decided THIS FRAME. Everything after this line is
+    // presentation: hostile fire dissolves, remaining actors resolve their
+    // exits, late pickups get a harmless catch window — then results.
+    beginStageResolution();
+    return;
+  }
+}
+
+// ── AFT-021 P1: THE STAGE-RESOLUTION BEAT ──────────────────────────────────
+// A short authored state between the win condition and the results panel.
+// On entry the fight is OVER as a matter of state: the ledger closes, every
+// hostile projectile/telegraph/beam dissolves, weapons disarm, and each
+// remaining actor is classified by its completion verb. The beat then plays
+// the exits — dispersed actors accelerate out, rescued friendlies fly to
+// safety, neutralized scenery powers down — and settles into results only
+// when the screen is visually resolved (or the 1.1s safety timeout retires
+// the stragglers). Departing actors grant NOTHING: no kills, drops, catches,
+// Surge, or relic procs — they retire silently, outside every kill hook.
+function beginStageResolution() {
+  statsEndLevel(); // combat time ends at the win moment, not at the panel
+  // finale mastery reads the WIN-MOMENT field — evaluate before departures
+  // and stand-downs mutate it (completeFinale is idempotent; the settle
+  // calls become confirmations)
+  if (stageIdx(G.level) === 2) completeFinale();
+  const R = { t: 0, minHold: 0.65, timeout: 1.1, outcomes: { dispersed: 0, rescued: 0, neutralized: 0 } };
+  // hostile presence dissolves NOW — a soft spark where each shot was
+  let sparks = 0;
+  for (const s of G.enemyShots) {
+    if (!s.dead && sparks < 10) { burst(s.x, s.y, '#b0bec5', 5, 120, 0.3); sparks++; }
+  }
+  G.enemyShots.length = 0;
+  G.telegraphs.length = 0;
+  G.columnStrikes.length = 0;
+  G.invuln = Math.max(G.invuln, 2); // belt-and-braces under the combatIsLive() gate
+  // weapons disarm: a held charge releases harmlessly, touch intent clears
+  chargeHeld = false; chargeTouchId = null; touchFirePendingId = null;
+  G.charge = 0; G.chargeFullT = 0;
+  // classify every remaining actor by its completion verb
+  for (const b of G.bricks) {
+    if (b.dead) continue;
+    if (b.friendly) {
+      R.outcomes.rescued++;
+      b.resolveOut = 'rescued';
+    } else if (b.gridTerminal || (b.hp >= 900 && !b.isBoss && !b.subBoss && !b.mythic)) {
+      // persistent scenery: stays, but powers down — no bars, rings, or
+      // targeting may survive on it (render reads stoodDown)
+      R.outcomes.neutralized++;
+      b.stoodDown = true;
+    } else if (b.crosser) {
+      R.outcomes.dispersed++;
+      b.resolveOut = 'dispersed';
+    } else {
+      // anything else the clear guard exempted resolves as a dispersal
+      R.outcomes.dispersed++;
+      b.resolveOut = 'dispersed';
+      if (!b.crosser) b.crosser = { vx: ((b.bx + G.fx) < W / 2 ? -1 : 1) * Math.max(160, W * 0.22), bobPh: Math.random() * 6 };
+    }
+  }
+  G.resolve = R;
+  G.state = 'resolve'; G.stateT = 0;
+  // AFT-021 P8: each completion verb SOUNDS different — a dispersal
+  // whooshes away, a rescue chimes upward, a stand-down powers off
+  if (R.outcomes.rescued) { tone(620, 0.14, 'sine', 0.06, 340); tone(930, 0.16, 'sine', 0.05, 240); }
+  else if (R.outcomes.dispersed) { noiseBurst(0.28, 0.07); tone(420, 0.2, 'sine', 0.04, -180); }
+  else if (R.outcomes.neutralized) { tone(300, 0.22, 'square', 0.04, -160); }
+  // the clear celebration plays over the departures, not behind a panel
+  const palette = ['#ffd54f', '#66bb6a', '#42a5f5', '#ec407a', '#ab47bc', '#ff7043'];
+  for (let i = 0; i < 6; i++) {
+    burst(W * (0.15 + Math.random() * 0.7), H * (0.2 + Math.random() * 0.3),
+      palette[i % palette.length], 14, 280, 1.2);
+  }
+}
+function updateResolve(dt) {
+  const R = G.resolve;
+  if (!R) { settleStageResolution(); return; }
+  R.t += dt;
+  let visible = 0;
+  for (const b of G.bricks) {
+    if (b.dead || b.stoodDown || b.dormant) continue;
+    const x = b.bx + G.fx, y = b.by + G.fy;
+    const on = x > -60 && x < W + 60 && y > -60 && y < H + 60;
+    if (b.resolveOut === 'rescued') {
+      b.by -= (170 + R.t * 260) * dt; // the ally climbs to safety
+      if (Math.random() < 0.25) sparkle(x, y + 14, 1, false);
+    } else if (b.crosser) {
+      // dispersal: the exit accelerates, with a shared departure trail
+      const accel = 1 + Math.min(2.4, R.t * 2.6);
+      b.bx += b.crosser.vx * accel * dt;
+      b.by += Math.sin(G.time * 4 + (b.crosser.bobPh || 0)) * 24 * dt;
+      if (Math.random() < 0.3) burst(x - Math.sign(b.crosser.vx) * 14, y, '#90a4ae', 1, 60, 0.25);
+    }
+    if (!on) { b.dead = true; continue; } // silently retired — no kill hooks, no rewards
+    visible++;
+  }
+  if (R.t >= R.timeout && visible > 0) {
+    // the safety timeout force-retires stragglers so results can never hang
+    for (const b of G.bricks) if (!b.dead && !b.stoodDown && !b.dormant) b.dead = true;
+    visible = 0;
+  }
+  // the fair catch window rides the HARMLESS beat now: late drops fall (a
+  // touch faster each second) and remain catchable; gravity bounds the wait
+  advancePickups(dt, 1, 1 + Math.min(1.6, R.t * 0.5));
+  const pickupsLeft = G.powerups.length > 0;
+  if (R.t >= R.minHold && visible === 0 && (!pickupsLeft || R.t >= 6)) settleStageResolution();
+}
+function settleStageResolution() {
+  const R = G.resolve || { outcomes: {} };
+  G.resolve = null;
+  {
     // ---- THE NINEFOLD DAWN: clearing stage 27 on a real journey ENDS the
     // old loop survives as TIME SPIRAL, an explicit choice on the ending's
     // final beat. Trials and dailies keep their existing flow.
     if (G.level === 27 && !G.trial && !G.daily) {
       G.score += Math.round((300 + 2 * 250) * (G.fx_score ? 2 : 1));
-      statsEndLevel();
       completeFinale(); // the final chase resolves its mastery INTO the Dawn
       beginEnding();
       return;
     }
     const clearedStage = stageIdx(G.level);
     const secretVictory = !!(G.secret.vmax && clearedStage === 2);
-    statsEndLevel();
     if (clearedStage === 2) completeFinale(); // resolve mastery BEFORE results read it
     // AFT-020 PREPARATION: completing the Challenge stage's realm objective
     // banks ONE temporary benefit for the finale — spent at the finale
@@ -7276,6 +7533,19 @@ function update(dt) {
     // BEFORE the draft. Built while statsCur() still points at the
     // cleared level and G.level is pre-increment.
     G.results = buildStageResults();
+    {
+      const oc = R.outcomes || {};
+      a11yAnnounce('Stage clear. ' + (G.results.kills || 0) + ' defeated'
+        + (oc.dispersed ? ', ' + oc.dispersed + ' dispersed' : '')
+        + (oc.rescued ? ', ' + oc.rescued + ' rescued' : '')
+        + (oc.neutralized ? ', ' + oc.neutralized + ' neutralized' : '')
+        + '. Tap to continue.', true);
+    }
+    // AFT-021 P1: results speak the completion VERBS — what was defeated,
+    // what fled, who was saved, what powered down (drawResults reads it)
+    G.results.outcomes = R.outcomes || {};
+    // AFT-021 P2: snapshot the resolved arena as the panels' static backdrop
+    if (typeof captureArenaPlate === 'function') captureArenaPlate();
     G.announce = null; G.announceQueue = []; // stale clear-time cards would overlap the panel
     G.level++;
     G.state = 'results'; G.stateT = 0;
@@ -7335,11 +7605,48 @@ function update(dt) {
       G.ceremony = { act: actIdx(G.level), t: 0, evo, burst1: false, burst2: false };
     }
     SFX.levelUp();
-    // confetti!
-    const palette = ['#ffd54f', '#66bb6a', '#42a5f5', '#ec407a', '#ab47bc', '#ff7043'];
-    for (let i = 0; i < 6; i++) {
-      burst(W * (0.15 + Math.random() * 0.7), H * (0.2 + Math.random() * 0.3),
-        palette[i % palette.length], 14, 280, 1.2);
-    }
+    // (the clear confetti fires at RESOLUTION entry now — celebration plays
+    // over the live departures, never frozen behind a panel)
   }
+}
+// combat and the resolution beat (AFT-021 P1). fallMul gently speeds late
+// drops during resolution so the catch window stays fair but bounded.
+function advancePickups(dt, ts, fallMul = 1) {
+  for (const pu of G.powerups) {
+    pu.y += pu.vy * ts * dt * fallMul; pu.rot += dt * 3;
+    if (pu.orb) pu.x += Math.sin(pu.rot * 0.9) * 26 * dt; // orbs waft down gently
+    if (pu.secretShard) {
+      pu.secretT -= dt;
+      if (pu.swift) {
+        // classic's ONE-PASS shard: fast, swaying, never homing — get the
+        // paddle under it or the rift closes when it drops past the floor
+        pu.x += Math.sin(pu.rot * 1.35) * 46 * dt;
+      } else {
+        // a shard freed from a downed courier is generous: the shoot-down was
+        // the test, so this catch bends toward the player on a long window
+        pu.x += (G.paddle.x - pu.x) * Math.min(1, dt * 2.6);
+        pu.vy = pu.y > shipY() - 120 ? 48 : 72;
+      }
+    }
+    { // AFT-007: the item magnet is BASELINE phone QoL now — every build gets
+      // the drift (the old `magnetize` key is the RELIC GLAIVE weapon tier)
+      const dx = G.paddle.x - pu.x;
+      pu.x += Math.sign(dx) * Math.min(Math.abs(dx) * 2, 60) * dt;
+    }
+    const pw = paddleW(), py = shipY(); // the ship catches wherever it flies
+    // Overgrowth widens the pickup catch envelope at each evolution.
+    const reach = 18 + starterMod('catchReach', 0);
+    if (pu.y > py - 20 && pu.y < py + 24 && Math.abs(pu.x - G.paddle.x) < pw / 2 + reach) {
+      pu.dead = true;
+      collectPickup(pu);
+    }
+    if (!pu.dead && pu.secretShard && (pu.secretT <= 0 || pu.y > H + 30)) {
+      pu.dead = true;
+      if (G.secret.pendingShard === pu.shardIndex) G.secret.pendingShard = null;
+      setAnnounce('alert', '#78909c', 'THE RIFT CLOSED',
+        'SHARD ' + (pu.shardIndex + 1) + '/3 WAS LEFT BEHIND', 2.5,
+        SKIN.secret.missWarn || 'MISS ANY PIECE AND THE NORMAL FINALE REMAINS');
+    } else if (!pu.dead && pu.y > H + 30) pu.dead = true;
+  }
+  compactInPlace(G.powerups, p => !p.dead);
 }

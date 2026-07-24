@@ -16,10 +16,12 @@ function touchButtons() {
   // side/top safe-area insets keep every control clear of notches and
   // rounded landscape corners, matching the existing bottom treatment
   const edge = n => left ? n + SAFE_L : W - n - SAFE_R;
+  // AFT-021 P2: ONE top corner target — pause. The sound toggle moved to the
+  // pause screen (it was a second large circle floating over the formation
+  // zone; live combat keeps only what live combat needs).
   const b = {
     mega:  { x: edge(138), y: base - 40, r: 30 * scale }, // beside FIRE — paddle rides above both
     pause: { x: edge(28), y: 86 + SAFE_T, r: 22 * scale }, // ≥44 px visible targets
-    sound: { x: edge(74), y: 84 + SAFE_T, r: 20 * scale },
   };
   // FIRE only when the blaster is armed — CLASSIC has none until you earn it,
   // and the ball is launched by tapping the playfield, not this pad. In the
@@ -60,7 +62,16 @@ let chargeHeld = false, chargeTouchId = null; // charge a big shot (right-click 
 // normal shot, or keep holding past this short intent threshold to charge. The
 // threshold prevents ordinary taps from becoming tiny accidental charge shots.
 let touchFirePendingId = null, touchFirePendingT = 0;
-const TOUCH_CHARGE_HOLD_MS = 220;
+// AFT-021 P4: 180ms (was 220) — the hold now CREDITS its elapsed time into
+// the charge at promotion, so the threshold only decides tap-vs-hold intent,
+// never delays the arc. 160–200ms is the plan's target band; press-down
+// feedback (pulse + haptic) fires immediately on the pad.
+const TOUCH_CHARGE_HOLD_MS = 180;
+// AFT-021: the INPUT CLOCK — the one wall-time source for tap-vs-hold intent.
+// Mockable (inputClockOverride) so the suite can drive deterministic hold
+// timings at any simulated frame rate; identical to performance.now() in play.
+let inputClockOverride = null;
+function inputNow() { return inputClockOverride != null ? inputClockOverride : performance.now(); }
 const uiTouchIds = new Set(); // touches claimed by on-screen buttons
 // Pin the steering target to the player's current position whenever a UI pad
 // claims a touch. This also neutralizes any pointer replay that arrived just
@@ -163,7 +174,7 @@ window.addEventListener('touchstart', e => {
           // tap from a hold. A second finger cannot steal an active FIRE touch.
           if (touchFirePendingId === null && chargeTouchId === null) {
             touchFirePendingId = t.identifier;
-            touchFirePendingT = performance.now();
+            touchFirePendingT = inputNow();
           }
         } else {
           // CLASSIC (and serve launch) keep their immediate press/held-fire
@@ -174,11 +185,10 @@ window.addEventListener('touchstart', e => {
       }
       if (inCircle(x, y, B.mega, 12)) { tryMega(); claimUiTouch(t.identifier, B.mega.x, B.mega.y, 'MEGA'); continue; }
       if (inCircle(x, y, B.pause, 10)) { togglePause(); claimUiTouch(t.identifier, B.pause.x, B.pause.y, 'PAUSE'); continue; }
-      if (inCircle(x, y, B.sound, 10)) { toggleMusic(); claimUiTouch(t.identifier, B.sound.x, B.sound.y, 'SOUND'); continue; }
       // near-miss dead zone: a fumbled tap AROUND a button is swallowed
       // outright — under no circumstances does it become paddle control
       if ((B.fire && inCircle(x, y, B.fire, 64)) || inCircle(x, y, B.mega, 42) ||
-          inCircle(x, y, B.pause, 30) || inCircle(x, y, B.sound, 30)) {
+          inCircle(x, y, B.pause, 30)) {
         claimUiTouch(t.identifier);
         continue;
       }
@@ -419,7 +429,15 @@ function togglePause() {
     advOpen = false; cheatOpen = false; saveSettings();
     return;
   }
-  if (G.state === 'play' || G.state === 'serve') paused = !paused;
+  if (G.state === 'play' || G.state === 'serve') {
+    paused = !paused;
+    // AFT-021 P4: no input may stay stuck charging across a pause — the
+    // held charge disarms cleanly (no surprise release on resume)
+    if (paused) {
+      chargeHeld = false; chargeTouchId = null; touchFirePendingId = null;
+      G.charge = 0; G.chargeFullT = 0;
+    }
+  }
 }
 // bail out of a run straight back to the title screen (keeps your best score)
 function quitToMenu() {
@@ -432,7 +450,15 @@ function quitToMenu() {
   dexScroll = 0;
   SFX.wall();
 }
-document.addEventListener('visibilitychange', () => { if (document.hidden && G.state === 'play') paused = true; });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && G.state === 'play') {
+    paused = true;
+    // AFT-021 P4: backgrounding disarms any held charge — nothing may stay
+    // stuck charging while the tab is away
+    chargeHeld = false; chargeTouchId = null; touchFirePendingId = null;
+    G.charge = 0; G.chargeFullT = 0;
+  }
+});
 
 function setSliderFromX(i, x) {
   const s = activeSliders()[i], gm = sliderGeom(i);
@@ -1303,6 +1329,7 @@ function onPress(x, y) {
       return;
     }
     if (inRect(x, y, cheatBtnGeom())) { cheatOpen = true; SFX.wall(); return; }
+    if (inRect(x, y, pauseMusicGeom())) { toggleMusic(); return; } // AFT-021 P2: sound lives on pause
     if (inRect(x, y, pauseSettingsGeom())) {
       cheatOpen = false;
       // A phone player arriving from pause most likely needs pad size,
@@ -1378,7 +1405,9 @@ function fireAction(auto = false) {
   if (G.blasterCD > 0) return;
   // HYPERNOVA CYCLE: during Mega an unbroken stream spins through 3 cadence
   // stages (the stream breaks — see tickEffects — and the stages fall away)
-  let cd = (upgN('hyper') ? 0.24 : 0.3) * starterMod('fireRate', 1);
+  // AFT-021 P6: HYPER's cadence bonus trims 25% → 18% (the VOLLEY probe ran
+  // 40% under the path median; the capstone's heat cut is untouched)
+  let cd = (upgN('hyper') ? 0.255 : 0.3) * starterMod('fireRate', 1);
   // OVERDRIVE cadence: Mega fires 20% faster while it lasts — a timed burst
   // on a meter you earned, not a fire-rate upgrade (the heat-fairness band
   // is measured on sustained NON-Mega fire and is untouched)
@@ -1445,6 +1474,24 @@ function fireAction(auto = false) {
   // CALIBRATED BARRAGE (shooter modes): a spent charge primed these volleys
   const calib = G.mode !== 'classic' && G.calibShots > 0;
   if (calib) G.calibShots--; // one prime per VOLLEY, not per bolt
+  // AFT-021 P6: SHIELDED RETALIATION — the AEGIS path's bounded damage
+  // conversion. While a shield charge is held, every 4th volley (3rd at the
+  // capstone) rides with a heavy retaliation bolt: the defense you built
+  // strikes back on a visible rhythm instead of tripling encounter time
+  // (the L15 aegis probe ran 157s vs the 66s median). No button, no aim.
+  if (G.mode !== 'classic' && pathLvl('aegis') >= 2 && G.shieldCharges > 0) {
+    G.aegisRetalN = (G.aegisRetalN || 0) + 1;
+    if (G.aegisRetalN >= (pathLvl('aegis') >= 4 ? 3 : 4)) {
+      G.aegisRetalN = 0;
+      G.lasers.push({
+        x: G.paddle.x + 20, y: shipY() - 14, basic: true, retal: true,
+        powerMul: 2.2, mega: G.megaT > 0,
+        shape: pilotInfo() ? pilotInfo().shape : null,
+        element: attackElement(), tier: G.starterLvl,
+      });
+      ringFx(G.paddle.x + 20, shipY() - 14, '#9ccc65', 3, 26, 2, 0.25);
+    }
+  }
   for (let i = 0; i < nBolts; i++) {
     G.lasers.push({
       x: G.paddle.x + (nBolts > 1 ? (i ? 11 : -11) : 0),
@@ -1471,6 +1518,23 @@ function fireCharge(c, resonant = false) {
   if (!blasterArmed()) return; // no paddle gun in classic — the charge can never fire
   G.chargedEver = true; // the charge tutor banner retires once you've done it
   G.lastChargeT = G.time; // the realm-1 DREAM MIRROR reads recent charges
+  // AFT-021 P4: charge telemetry — every release records its full arc and
+  // the time domains that were live, so a "the charge felt wrong" report is
+  // answerable from DEV.report().chargeTelemetry instead of a guess
+  {
+    const cur = G.chargeCur || {};
+    if (!G.chargeLog) G.chargeLog = [];
+    G.chargeLog.push({
+      pressMs: cur.pressMs || 0, fullS: cur.fullS ?? null,
+      strength: +c.toFixed(2), resonant: !!resonant,
+      fastFill: !!upgN('heavy'),
+      domains: { speed: SETTINGS.speed, slow: !!G.fx_slow, chill: G.starterChillT > 0, dramatic: G.dramaticT > 0 },
+      boltPxPerS: Math.round(900 * (typeof weaponScale === 'function' ? weaponScale() : 1)),
+      cadenceMs: typeof PERF !== 'undefined' ? +PERF.cadenceAvg().toFixed(1) : null,
+    });
+    if (G.chargeLog.length > 24) G.chargeLog.shift();
+    G.chargeCur = null;
+  }
   statsShotFired(true);
   if (resonant) statsResonant();
   // AEGIS LANCE: while shielded, a full charge SPENDS one real shield and the
@@ -1505,6 +1569,7 @@ function fireCharge(c, resonant = false) {
   G.muzzle = 0.18;
   G.shake = Math.min(G.shake + 2 + c * 4, 12);
   if (resonant) {
+    haptic('resonant'); // AFT-021 P8
     addFloater(G.paddle.x, shipY() - 72, 'RESONANT!', '#80ffea', 15);
     ringFx(G.paddle.x, shipY() - 20, '#80ffea', 5, 74, 3, 0.4);
     tone(1240, 0.16, 'sine', 0.06, 320); // the crystalline timing chime
@@ -1576,9 +1641,7 @@ function tryMega() {
     ringFx(px, py, TYPE_COLORS[el] || '#ffd54f', 10, 150, 5, 0.5);
   }
   // REACTIVE OVERDRIVE: entering Mega regrows one missing shield (on cooldown)
-  if (upgN('reactive') && G.reactiveCD <= 0 && G.shieldCharges < shieldCap()) {
-    G.shieldCharges++;
-    statsShieldGain('reactive');
+  if (upgN('reactive') && G.reactiveCD <= 0 && tryShieldGain('reactive')) {
     G.reactiveCD = 20;
     addFloater(G.paddle.x, shipY() - 62, 'REACTIVE SHIELD!', '#dce775', 13);
     SFX.shield();

@@ -5,7 +5,11 @@
 const PRESETS = {
   easy:     { label: 'EASY',     descent: 0.42, shotRate: 0.5,  shotSpeed: 0.65, bossHp: 0.68, brickHp: 0.9,  ballSpeed: 0.85, lives: 5, starThreat: 0.72, heatBuild: 0.39, heatCool: 0.29 },
   normal:   { label: 'NORMAL',   descent: 0.9,  shotRate: 1.0,  shotSpeed: 0.9,  bossHp: 1.12, brickHp: 1.15, ballSpeed: 0.95, lives: 4, starThreat: 1.0,  heatBuild: 0.42, heatCool: 0.28 },
-  hard:     { label: 'HARD',     descent: 1.42, shotRate: 1.85, shotSpeed: 1.18, bossHp: 1.45, brickHp: 1.38, ballSpeed: 1.1,  lives: 3, starThreat: 1.24, heatBuild: 0.44, heatCool: 0.27 },
+  // AFT-021 P7: ACE separates from ADVENTURE in THREAT, not health sponges —
+  // durability sits ~11% over normal (was +29%) while pattern density and
+  // recovery pressure rise (starThreat 1.24 → 1.55). Duration target ≈
+  // +10–20% over Adventure with meaningfully more incoming fire.
+  hard:     { label: 'HARD',     descent: 1.42, shotRate: 1.85, shotSpeed: 1.18, bossHp: 1.25, brickHp: 1.24, ballSpeed: 1.1,  lives: 3, starThreat: 1.55, heatBuild: 0.44, heatCool: 0.27 },
   // AFT-008 §9.10: ONE LIFE's identity is the one-hit/tree-burn stake — it
   // no longer ALSO runs the longest bars and fastest fire (the old
   // 1.65×/2.35× triple penalty). Ace-like patterns, one-life stakes.
@@ -448,6 +452,12 @@ function pauseActionLayout() {
 }
 function pauseSettingsGeom() { return pauseActionLayout().settings; }
 function pauseQuitGeom() { return pauseActionLayout().quit; }
+// AFT-021 P2: the live SOUND circle moved off the combat screen — this is
+// its pause-screen home (one tap to mute, same as before, minus the overlap)
+function pauseMusicGeom() {
+  const s = pauseSettingsGeom();
+  return { x: s.x, y: s.y - 44, w: s.w + 12 + s.w, h: 32 };
+}
 function gameOverLayout() {
   const narrow = W < 620, pw = Math.min(620, W * 0.94);
   const ph = Math.min(H * 0.86, narrow ? 560 : 500);
