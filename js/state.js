@@ -43,7 +43,7 @@ function journeyDmgMul() { return 1 + 0.06 * megaRegions(); }
 const FINALE_WORK = [1.15, 1.8, 2.3, 2.5, 4.2, 3.9, 16, 25, 9.3];
 const FINALE_WORK_MODE = {
   classic: [0.28, 0.30, 0.55, 0.68, 0.85, 1.50, 0.85, 1.40, 0.90],
-  blaster: [0.22, 1.00, 0.24, 0.85, 0.62, 2.75, 0.85, 0.45, 0.90],
+  blaster: [0.22, 1.0, 0.24, 0.85, 0.62, 2.75, 1.08, 0.45, 0.9],
 };
 function sovereignHp(rIdx, cycle) {
   const p = preset();
@@ -148,6 +148,99 @@ function shotEffect(shotType) {
 // paddle line outside junkie mode. The band gives ~120px of vertical flight.
 const SHIP_BAND = 120;
 function shipY() { return G.mode === 'junkie' ? G.shipYv : PADDLE_Y(); }
+// ============================================================
+// AFT-009R P2: ATTUNEMENT — the frequent progression loop. A RESONANCE
+// meter fills through normalized encounter CONTRIBUTION (non-renewable
+// kills, boss damage/phases, objective and finale-beat progress) — never
+// wall time, never renewable-population farming (`br.reinf` kills are
+// worthless here by design). A completed level QUEUES until a combat-safe
+// beat, then opens the three-card draft mid-wave; the wave freezes under
+// the 'upgrade' state and resumes exactly where it stood.
+// Income values are expressed in BASELINE SECONDS of ordinary combat, so
+// the level bands below read as pacing targets, not raw timers.
+// ============================================================
+const RESONANCE_MODE_MUL = { junkie: 1, blaster: 1, classic: 1 }; // calibrated by the P6 probes
+function attuneNeed(level) { // seconds-of-contribution to REACH this level
+  return level <= 3 ? 22 : level <= 7 ? 35 : level <= 12 ? 50 : level <= 15 ? 67 : level <= 18 ? 90 : 115;
+}
+function gainResonance(sec, why) {
+  const A = G.attune;
+  if (!A || typeof combatIsLive === 'function' && !combatIsLive()) return;
+  if (G.trial && G.trialNoAttune) return; // deep-trial builds are granted, not earned
+  A.res += sec * (RESONANCE_MODE_MUL[G.mode] || 1);
+  let guard = 0;
+  while (A.res >= A.need && guard++ < 6) {
+    A.res -= A.need;
+    A.level++;
+    A.pending++;
+    A.need = attuneNeed(A.level + 1);
+    statsAttuneLevel(A.level);
+  }
+}
+function statsAttuneLevel(lvl) {
+  const L = statsCur();
+  if (L) (L.attuneAt = L.attuneAt || []).push(+(G.playT || 0).toFixed(1));
+}
+// contribution events — every value is "about this many seconds of ordinary
+// combat", the one normalization that keeps the three modes comparable
+function resKill(br) {
+  if (br.reinf || br.crosser || br.friendly) return; // renewable/neutral: no farming
+  if (br.isBoss || br.subBoss || br.mythic || br.secretBoss) return; // bosses pay via deciles
+  const elite = (br.elite || 0) >= 2 || br.armored;
+  gainResonance(elite ? 2.6 : 1.5, 'kill');
+}
+function resBossDamage(br, dmg) {
+  if (!(br.isBoss || br.subBoss || br.mythic || br.secretBoss) || !br.maxHp) return;
+  br.resAcc = (br.resAcc || 0) + dmg;
+  const decile = br.maxHp / 10;
+  while (br.resAcc >= decile) { br.resAcc -= decile; gainResonance(2.2, 'bossDecile'); }
+}
+function resEvent(kind) { // phase turns, finale beats, objective wins…
+  gainResonance(kind === 'phase' ? 6 : kind === 'beat' ? 8 : kind === 'objective' ? 10 : 4, kind);
+}
+// the combat-safe gate: a queued level NEVER interrupts a held charge, an
+// open desperation channel, live lane strikes, a chase rush, the engage
+// hold, the resolution beat — or a Breaker ball falling toward the paddle
+function attuneSafeNow() {
+  if (G.state !== 'play' || paused || G.reveal || G.resolve) return false;
+  if (G.stateT < 1.2 || (G.engageHold || 0) > 0) return false;
+  if (typeof chargeHeld !== 'undefined' && chargeHeld) return false;
+  if (G.charge > 0 || G.chargeCD > 0.1) return false;
+  if (G.columnStrikes.length) return false;
+  if (G.bricks.some(b => !b.dead && b.channel)) return false;
+  const CH = typeof chaseState === 'function' && chaseState();
+  if (CH && CH.rush && !CH.rush.hit) return false;
+  if (G.mode === 'classic') {
+    // a ball below mid-screen and falling is the player's whole attention
+    if (G.balls.some(b => !b.dead && !b.stuck && b.vy > 0 && b.y > H * 0.5)) return false;
+  }
+  return true;
+}
+// AFT-009R P5: a GRANTED build (deep-start trial, dev launch, a resumed
+// checkpoint without attune fields) reads as that many completed levels,
+// so the pacing bands continue from the build's real weight instead of
+// restarting the curated opening mid-journey.
+function syncAttuneToBuild() {
+  const A = G.attune; if (!A) return;
+  const lvl = totalBuildLevels();
+  if (lvl > A.level) {
+    A.level = lvl; A.presented = lvl; A.pending = 0; A.res = 0;
+    A.need = attuneNeed(lvl + 1);
+  }
+}
+function presentAttunementLevel() {
+  const A = G.attune;
+  if (!A || A.pending <= 0) return;
+  A.pending--;
+  A.presented = (A.presented || 0) + 1;
+  G.attuneLive = true;
+  rollAttunementHand();
+  if (!G.upgradeChoices) { G.attuneLive = false; return; } // nothing left to offer
+  G.state = 'upgrade'; G.stateT = 0;
+  if (typeof draftSel !== 'undefined') draftSel = null;
+  if (typeof upgradeTreeOpen !== 'undefined') upgradeTreeOpen = false;
+  SFX.power();
+}
 // AFT-022 F4: the STARFIGHTER edge clamp must cover the ship's full RENDERED
 // footprint — the hull sprite grows with form (54 + 6·form px), the sworn
 // oath adds a halo ring, and the wing HARDPOINT rack fans chips outward per
@@ -187,7 +280,7 @@ function shipFootprintHalf() {
 function migrateCheckpoint(c) {
   try {
     if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
-    if (!(c.v >= 1 && c.v <= 4) || !(+c.lvl >= 4)) return null;
+    if (!(c.v >= 1 && c.v <= 5) || !(+c.lvl >= 4)) return null;
     const path = {};
     for (const k of PATH_KEYS) {
       const n = Math.max(0, Math.min(4, Math.floor(+((c.path || {})[k]) || 0)));
@@ -199,8 +292,23 @@ function migrateCheckpoint(c) {
     const stacks = freshStacks(); // all STACK_ITEMS keys incl. affinity satellites
     for (const k of Object.keys(stacks)) stacks[k] = Math.max(0, Math.floor(+((c.stacks && typeof c.stacks === 'object' ? c.stacks : {})[k]) || 0));
     const lives = Math.max(1, Math.floor(+c.lives) || 1);
+    // AFT-009R P5: derive the attunement arc for pre-v5 saves from the
+    // build's real weight — no owned upgrade is ever lost in migration
+    const ranks = Object.values(path).reduce((a, n) => a + n, 0)
+      + Object.keys(upg).filter(k => [...WEB_BRIDGE_KEYS, ...WEB_FUSION_KEYS, ...WEB_APEX_KEYS].includes(k)).length
+      + Object.values(stacks).reduce((a, n) => a + n, 0);
+    const at = c.attune && typeof c.attune === 'object' ? c.attune : null;
     return {
-      v: 4, lvl: Math.floor(+c.lvl), score: Math.max(0, Math.floor(+c.score) || 0),
+      // v5 (AFT-009R): + attune / focus / reforgeUsed (derived when absent)
+      v: 5, lvl: Math.floor(+c.lvl), score: Math.max(0, Math.floor(+c.score) || 0),
+      attune: {
+        level: Math.max(0, Math.floor(+(at && at.level) || 0)) || ranks,
+        res: Math.max(0, +(at && at.res) || 0),
+        pending: Math.max(0, Math.floor(+(at && at.pending) || 0)),
+        presented: Math.max(0, Math.floor(+(at && at.presented) || 0)) || ranks,
+      },
+      focus: Math.max(0, Math.min(3, Math.floor(+c.focus) || 0)) || 2,
+      reforgeUsed: !!c.reforgeUsed,
       skin: typeof c.skin === 'string' ? c.skin : 'pokemon',
       lives, livesMax: Math.max(lives, Math.floor(+c.livesMax) || 0),
       mode: typeof c.mode === 'string' ? c.mode : 'junkie',
@@ -231,7 +339,10 @@ if (RUN_CKPT && RUN_CKPT.skin !== SKIN.id) RUN_CKPT = null;
 function saveCheckpoint() {
   if (G.daily) return;
   RUN_CKPT = {
-    v: 4, skin: SKIN.id,
+    // v5 (AFT-009R): + attune / focus / reforgeUsed
+    v: 5, skin: SKIN.id,
+    attune: G.attune ? { level: G.attune.level, res: +G.attune.res.toFixed(2), pending: G.attune.pending, presented: G.attune.presented } : null,
+    focus: G.focus, reforgeUsed: !!G.reforgeUsed,
     lvl: G.level, score: G.score, lives: G.lives, livesMax: G.livesMax, mode: G.mode,
     starter: G.starter, starterLvl: G.starterLvl,
     path: { ...G.path }, upg: { ...G.upg }, stacks: { ...G.stacks },
@@ -354,6 +465,15 @@ function resumeRun() {
   G.catchBonus = c.catchBonus || 0; G.caughtRun = c.caughtRun || 0;
   G.adapt = c.adapt || 1; G.mega = Math.max(G.mega, c.mega || 0);
   G.starterLvl = c.starterLvl || starterStage(c.lvl, G.starter);
+  // AFT-009R P5: the attunement arc rides the save; pre-v5 checkpoints
+  // arrive with fields derived from the build (migrateCheckpoint)
+  if (c.attune) {
+    G.attune = { level: c.attune.level, res: c.attune.res, pending: c.attune.pending,
+      presented: c.attune.presented, need: attuneNeed(c.attune.level + 1) };
+  }
+  syncAttuneToBuild();
+  G.focus = c.focus != null ? c.focus : 2;
+  G.reforgeUsed = !!c.reforgeUsed;
   G.lastDraftForm = webForm(); // resume never fakes a fresh-evolution draft
   maybeRelicNotice(); // AFT-007: a restored bond build learns about the reforge once
   if (c.secret) {
@@ -449,6 +569,9 @@ const G = {
   // blaster heat: firing builds it, paddle returns vent it, 100% = overheat
   heat: 0, overheat: 0,
   autoVent: false, // AFT-022 F1: the auto-fire assist is holding its fire to cool
+  attune: null, attuneLive: false, // AFT-009R P2: the frequent progression loop
+  forge: null, // AFT-009R P3: the realm-finale AETHER FORGE ({step, action, ...})
+  focus: 2, reforgeUsed: false, // AFT-009R P5: reroll charges + the one realm Reforge
   upg: {}, path: {}, catchBonus: 0, upgradeChoices: null, clearedStage: 0,
   // ---- upgrade-web runtime (bridges / superskills / offer memory) ----
   calibReturns: 0, calibShots: 0, // CALIBRATED BARRAGE: classic return count / primed volleys left
@@ -1175,6 +1298,7 @@ function buildLevel(lvl) {
   // (per element) and the first reinforcement wave announce; repeats within
   // the stage stay quiet local feedback instead of another banner
   G.powerSeen = {}; G.reinforceAnnounced = false;
+  if (stageIdx(lvl) === 0) G.reforgeUsed = false; // AFT-009R P5: one Reforge per realm
   // AFT-021 P7: THE BLASTER HULL PLATE — the turret is the least mobile
   // mode and the only one whose every loss is enemy fire; it opens each
   // stage with one seeded absorb (a start-of-stage SEED, like AEGIS Guard —
@@ -2224,6 +2348,10 @@ function resetRun(startLevel = 1, trial = false, opts = {}) {
   // buildLevel keeps the paddle where the player left it ON PURPOSE; only
   // the run boundary homes.
   G.paddle.x = W / 2; G.paddle.speed = 0; G.shipYv = PADDLE_Y();
+  // AFT-009R P2: a new journey starts its attunement arc from zero
+  G.attune = { level: 0, res: 0, need: attuneNeed(1), pending: 0, presented: 0 };
+  G.attuneLive = false; G.forge = null;
+  G.focus = 2; G.reforgeUsed = false; // AFT-009R P5: two Focus Charges to start
   G.score = 0; G.scoreShown = 0; G.comboPop = 0; G.lives = p.lives; G.livesMax = p.lives; G.level = startLevel; G.combo = 0;
   G.shotsFired = 0; G.playT = 0;
   G.maxCombo = 0; G.caughtRun = 0; G.dropHint = 0; G.healthDropPity = 0; G.megaCalloutDone = false; G.megaWasReady = false;
@@ -2349,6 +2477,7 @@ function resetRun(startLevel = 1, trial = false, opts = {}) {
     // cooldown floors.)
     G.engageHold = G.mode !== 'classic' ? 1.8 : 0;
   }
+  syncAttuneToBuild(); // AFT-009R P5: deep starts/trials read as completed levels
 }
 function startDailyRun() {
   SETTINGS.mode = 'classic'; SETTINGS.preset = 'normal'; SETTINGS.starter = 'fire';
@@ -2532,7 +2661,7 @@ function beginTimeSpiral() {
   G.state = 'upgrade'; G.stateT = 0;
   G.clearedStage = 2;
   rollUpgradeChoices();
-  upgradeTreeOpen = G.mode === 'junkie' && !!G.upgradeChoices && G.upgradeChoices.every(x => x.pathKey || x.web || x.stack);
+  upgradeTreeOpen = false; // AFT-009R P4: cards are the one installation surface
   if (upgradeTreeOpen) syncTreeSelectionToDraft();
   draftSel = null; G.rerolled = false;
   setAnnounce('warp', '#d780ff', 'TIME SPIRAL', 'THE JOURNEY LOOPS — HARDER SKIES AHEAD', 3.2);

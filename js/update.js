@@ -893,6 +893,7 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
     return;
   }
   statsDmgOut(meta.source || 'other', Math.min(Math.max(0, br.hp), dmg));
+  resBossDamage(br, Math.min(Math.max(0, br.hp), dmg)); // AFT-009R P2: boss work pays resonance by deciles
   br.hp -= dmg;
   // THE FIRST FUSION: the chained pair SHARES every wound — half of any
   // hit mirrors to the partner (one linked work budget, never two bars)
@@ -960,6 +961,7 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
     const newPhase = Math.min(phaseCount, 1 + Math.floor((1 - fracLeft) * phaseCount));
     if (newPhase > br.phase) {
       statsBossPhaseMark(br, br.phase);
+      resEvent('phase'); // AFT-009R P2: turning a boss phase is resonance
       br.phase = newPhase;
       // The hit that ended one phase cannot spill straight through the next.
       // This short gate protects boss choreography without creating a long
@@ -1028,6 +1030,7 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
   if (br.hp <= 0) {
     br.dead = true;
     statsKill();
+    resKill(br); // AFT-009R P2: a non-renewable kill is resonance
     if (br.reinf) statsKillRenew(); // renewable-population kill (AFT-008 farm audit)
     // RAID: the last vine down frees the bound mythic (optional risk/reward)
     if (br.raidVine && raidState() && !G.bricks.some(b => b.raidVine && !b.dead && b !== br)) raidFreeBound();
@@ -2226,7 +2229,12 @@ function rollUpgradeChoices() {
     (needDefense && ['defense', 'utility'].includes(PATHS[k].family) ? 5 : 0) +
     (wish === 'commit' && pathLvl(k) > 0 && pathLvl(k) === maxInv ? 6 : 0) +
     (G.mode === 'classic' && PATHS[k].family === 'offense' && pathLvl(k) === 2 ? 4 : 0);
-  const rankedCont = PATH_KEYS.filter(k => pathLvl(k) < 4)
+  // AFT-009R P2: THE FOUR-PATH CAP — an ordinary journey runs at most four
+  // active paths. Once the slots are full, hands only strengthen owned
+  // paths (mastery stacks and transformations still flow); a checkpoint
+  // grandfathered past four keeps every owned path playable.
+  const ownedPathN = PATH_KEYS.filter(k => pathLvl(k) > 0).length;
+  const rankedCont = PATH_KEYS.filter(k => pathLvl(k) < 4 && (pathLvl(k) > 0 || ownedPathN < 4))
     .map(k => ({ k, s: scoreCont(k) })).sort((a, b) => b.s - a.s).map(x => x.k);
   const picked = [], webPicked = [], used = new Set();
   const takeCont = pred => {
@@ -2327,6 +2335,171 @@ function rollUpgradeChoices() {
   // AFT-008: record every dealt hand so offer frequency can normalize pick rates
   if (choices.length) statsOffer(choices.map(c =>
     c.web ? c.web.key : c.stack ? 'stack:' + c.stack.key : c.pathKey || '?'));
+}
+
+// AFT-009R P3: THE AETHER FORGE — the realm-finale decision. Step one is
+// up to three simple ACTIONS (unavailable ones are OMITTED, never shown
+// disabled): REFINE (a rank or mastery — the mastery-sized hand keeps
+// AFT-020's wider-draft reward), LINK (an eligible Form II bridge), and
+// EVOLVE (an eligible Fusion or Apex). Choosing Link/Evolve opens a
+// focused second step of at most three recipes. Engine eligibility
+// (Form II / Final Form / stage 24+, the 2-fusion and 1-apex caps) is the
+// complexity schedule — the Forge never shows what the run cannot install.
+function forgeWebChoice(def, kind) {
+  return {
+    web: def, webKind: kind,
+    tags: kind === 'apex' ? ['APEX', ...def.paths.map(pk => skinPathName(pk))]
+      : kind === 'fusion' ? ['FUSION', ...def.paths.map(pk => skinPathName(pk))]
+        : [PATHS[def.paths[0]].name, PATHS[def.paths[1]].name],
+    synergy: kind === 'apex'
+      ? 'APEX: TWO OF ITS FUSIONS INSTALLED + NINE RANKS ACROSS ' + def.paths.map(pk => skinPathName(pk)).join(' / ')
+      : kind === 'fusion'
+        ? 'FUSION: ' + def.paths.map(pk => skinPathName(pk)).join(' × ') +
+          (def.bridge ? ' · VIA ' + webBridge(def.bridge).name : ' · CROSS-WEB') +
+          ' · SLOT ' + (fusionsOwnedCount() + 1) + '/2'
+        : 'BRIDGES ' + PATHS[def.paths[0]].name + ' AND ' + PATHS[def.paths[1]].name,
+    comparison: kind === 'apex' ? '★★ APEX TRANSFORMATION · STAGE 24+'
+      : kind === 'fusion' ? '★ RULE CHANGE · FUSION POWER' : 'NEW SYSTEM · FORM II BRIDGE',
+  };
+}
+function forgeActions() {
+  const bridges = WEB_BRIDGES.filter(bridgeEligible);
+  const fusions = WEB_FUSIONS.filter(fusionEligible);
+  const apexes = WEB_APEXES.filter(apexEligible);
+  const anyBridgeOwned = WEB_BRIDGES.some(b => upgN(b.key));
+  const acts = [{ key: 'refine', name: 'REFINE', color: '#80d8ff', icon: 'target',
+    desc: 'ADD A RANK TO AN ACTIVE PATH — OR TAKE A MASTERY' }];
+  if (bridges.length) acts.push({ key: 'link', name: 'LINK', color: '#ffd54f', icon: 'multi',
+    desc: 'INSTALL A FORM II BRIDGE — TWO PATHS LEARN TO WORK AS ONE',
+    first: !anyBridgeOwned && regionIdx(Math.max(1, G.level - 1)) >= 2 });
+  if (fusions.length || apexes.length) acts.push({ key: 'evolve', name: 'EVOLVE', color: '#d780ff', icon: 'mega',
+    desc: apexes.length ? 'AN APEX TRANSFORMATION IS WITHIN REACH' : 'FORGE A FUSION — A RULE OF YOUR BUILD CHANGES' });
+  // AFT-009R P5: one REFORGE per realm — refund a legal rank, bank a level.
+  // Only ranks whose removal keeps every installed transformation legal are
+  // offered (webRegressibleLeaves simulates each), so a Fusion or Apex can
+  // never be invalidated; blocked ranks simply do not appear.
+  if (!G.reforgeUsed && webRegressibleLeaves().some(l => l.kind === 'tier')) {
+    acts.push({ key: 'reforge', name: 'REFORGE', color: '#ff8a65', icon: 'warp',
+      desc: 'REFUND A RANK — ITS POWER RETURNS AS A BANKED ATTUNEMENT CHOICE' });
+  }
+  return acts;
+}
+function forgeChoose(action) {
+  const F = G.forge; if (!F) return;
+  if (action === 'refine') {
+    rollUpgradeChoices();
+    if (G.upgradeChoices) {
+      const pure = G.upgradeChoices.filter(c => !c.web); // a rank or a mastery — transformations live behind LINK/EVOLVE
+      if (pure.length >= 2) G.upgradeChoices = pure;
+    }
+  } else if (action === 'link') {
+    G.upgradeChoices = WEB_BRIDGES.filter(bridgeEligible).slice(0, 3).map(d => forgeWebChoice(d, 'bridge'));
+  } else if (action === 'reforge') {
+    G.upgradeChoices = webRegressibleLeaves().filter(l => l.kind === 'tier').slice(0, 3)
+      .map(l => ({ reforge: { pathKey: l.pathKey, tierIdx: pathLvl(l.pathKey) - 1 } }));
+  } else {
+    const apexes = WEB_APEXES.filter(apexEligible).map(d => forgeWebChoice(d, 'apex'));
+    const fusions = WEB_FUSIONS.filter(fusionEligible).map(d => forgeWebChoice(d, 'fusion'));
+    G.upgradeChoices = [...apexes, ...fusions].slice(0, 3);
+  }
+  if (!G.upgradeChoices || !G.upgradeChoices.length) { G.upgradeChoices = null; F.step = 'menu'; return; }
+  F.step = 'hand'; F.action = action;
+  if (typeof draftSel !== 'undefined') draftSel = null;
+  G.stateT = Math.max(G.stateT, 0.85); // the hand is immediately readable — no re-fade
+  SFX.wall();
+}
+function forgeBack() {
+  const F = G.forge; if (!F || F.step !== 'hand') return;
+  F.step = 'menu'; F.action = null;
+  G.upgradeChoices = null;
+  if (typeof draftSel !== 'undefined') draftSel = null;
+  SFX.wall();
+}
+
+// AFT-009R P2: the attunement hand. The OPENING is curated so complexity
+// arrives gradually — hand 1 offers the weapon trio (VOLLEY / IMPACT /
+// RELIC), hand 2 the support trio (PRISM / AEGIS / SURGE), hand 3 deepens
+// an owned path or branches once; every later hand reuses the
+// strengthen/adapt/synergize roller under the four-path cap. Selecting a
+// NEW path installs its first tier (the normal tier-0 pick).
+function attuneTierChoice(k) {
+  const tierIdx = pathLvl(k);
+  if (tierIdx >= 4) return null;
+  return { pathKey: k, path: PATHS[k], tier: PATHS[k].tiers[tierIdx], tierIdx,
+    tags: tierTags(k, tierIdx), synergy: tierSynergy(k, tierIdx), comparison: tierComparison(k, tierIdx) };
+}
+function rollAttunementHand() {
+  const A = G.attune;
+  const hand = A ? A.presented : 99;
+  if (hand === 1 || hand === 2) {
+    const trio = hand === 1 ? ['arsenal', 'impact', 'bond'] : ['prism', 'aegis', 'surge'];
+    const backup = hand === 1 ? ['prism', 'aegis', 'surge'] : ['arsenal', 'impact', 'bond'];
+    const picks = trio.filter(k => pathLvl(k) === 0);
+    for (const k of backup) if (picks.length < 3 && pathLvl(k) === 0) picks.push(k);
+    const choices = picks.slice(0, 3).map(attuneTierChoice).filter(Boolean);
+    if (choices.length >= 2) {
+      G.upgradeChoices = choices;
+      G.lastOfferKeys = choices.map(c => 'path:' + c.pathKey + ':' + c.tierIdx);
+      statsOffer(choices.map(c => c.pathKey));
+      return;
+    } // dev grants already filled the trios — fall through to the roller
+  }
+  if (hand === 3) {
+    const owned = PATH_KEYS.filter(k => pathLvl(k) > 0 && pathLvl(k) < 4);
+    const unowned = ['aegis', 'prism', 'surge', 'bond', 'arsenal', 'impact'].filter(k => pathLvl(k) === 0);
+    const choices = [
+      ...owned.slice(0, 2).map(attuneTierChoice),
+      ...(unowned.length ? [attuneTierChoice(unowned[0])] : []),
+    ].filter(Boolean).slice(0, 3);
+    if (choices.length >= 2) {
+      G.upgradeChoices = choices;
+      G.lastOfferKeys = choices.map(c => 'path:' + c.pathKey + ':' + c.tierIdx);
+      statsOffer(choices.map(c => c.pathKey));
+      return;
+    }
+  }
+  rollUpgradeChoices();
+}
+
+// AFT-009R P1: ONE card anatomy for every draft offer — icon, name, a KIND
+// tag from the fixed five (NEW / UPGRADE / CAPSTONE / MASTERY / EVOLVE),
+// one plain-language effect sentence, a current → new value where one
+// exists, and a short synergy hint. Render draws THIS model; it never
+// reaches into the choice payload's internals, so the level-up screen and
+// the Forge (P3) present identically shaped cards.
+function draftCardModel(c) {
+  if (c.reforge) {
+    const k = c.reforge.pathKey, n = pathLvl(k);
+    const tierName = G.mode === 'junkie' ? junkieTierName(k, n - 1) : PATHS[k].tiers[n - 1].name;
+    return { icon: PATHS[k].tiers[n - 1].icon, color: '#ff8a65', name: tierName,
+      tag: 'REFORGE', head: skinPathName(k) + ' · REFUND RANK ' + n + '/4',
+      sentence: 'REFUND THIS RANK — ITS POWER RETURNS AS A BANKED ATTUNEMENT CHOICE',
+      delta: 'RANK ' + n + ' → ' + (n - 1), hint: 'ONE REFORGE PER REALM · TRANSFORMATIONS ARE NEVER BROKEN' };
+  }
+  if (c.secret) {
+    return { icon: c.secret.icon, color: c.secret.color, name: c.secret.name,
+      tag: 'EVOLVE', head: 'SECRET · RIFT EXCLUSIVE',
+      sentence: c.secret.desc, delta: null, hint: 'ONE-TIME RIFT REWARD' };
+  }
+  if (c.web) {
+    const head = c.webKind === 'apex' ? '★★ APEX · STAGE 24+'
+      : c.webKind === 'fusion' ? '★ FUSION · FINAL FORM' : 'BRIDGE · FORM II';
+    return { icon: c.web.icon, color: c.web.color, name: c.web.name,
+      tag: 'EVOLVE', head,
+      sentence: webNodeDesc(c.web), delta: c.comparison || null, hint: c.synergy || null };
+  }
+  if (c.stack) {
+    const owned = (G.stacks && G.stacks[c.stack.key]) || 0;
+    return { icon: c.stack.icon, color: c.stack.color, name: c.stack.name,
+      tag: 'MASTERY', head: 'MASTERY STACK',
+      sentence: (G.mode !== 'classic' && c.stack.sdesc) ? c.stack.sdesc : c.stack.desc,
+      delta: '×' + owned + ' → ×' + (owned + 1), hint: c.stack.hint || null };
+  }
+  const tag = c.tierIdx === 0 ? 'NEW' : c.tierIdx === 3 ? 'CAPSTONE' : 'UPGRADE';
+  const tierName = G.mode === 'junkie' ? junkieTierName(c.pathKey, c.tierIdx) : c.tier.name;
+  return { icon: c.tier.icon, color: c.path.color, name: tierName,
+    tag, head: skinPathName(c.pathKey) + ' · RANK ' + (c.tierIdx + 1) + '/4',
+    sentence: tierDesc(c.pathKey, c.tierIdx), delta: c.comparison || null, hint: c.synergy || null };
 }
 
 // A shield charge absorbs one lethal hit on the player (enemy shot or column
@@ -2788,15 +2961,17 @@ function loseLife(cause = 'MISSED BALL', shot = null) {
     // no owned dependents — a removal can never orphan a bridge or a
     // superskill's recipe), refill lives, and retry this wave — the run only
     // truly ends once there's nothing left to burn.
-    if (totalBuildLevels() > 0) {
+    if (totalBuildLevels() > 0 || (G.attune && G.attune.level > 0)) {
       statsKnockout(); // mark the failed attempt before the retry record opens
-      const lost = [];
-      for (let i = 0; i < 2 && totalBuildLevels() > 0; i++) {
-        const leaves = webRegressibleLeaves();
-        if (!leaves.length) break;
-        const name = regressWebLeaf(leaves[Math.floor(gameRand() * leaves.length)]);
-        if (name) lost.push(name);
-      }
+      // AFT-009R P5: DELIBERATE CHOICES STAY OWNED — a defeat never
+      // uninstalls an upgrade. The cost is the UNSPENT progress: current
+      // resonance, banked (unpresented) attunement levels, and one Focus
+      // Charge evaporate; every rank and transformation survives the retry.
+      const A = G.attune;
+      const lostLvls = A ? A.pending : 0;
+      if (A) { A.res = 0; A.pending = 0; }
+      const lostFocus = G.focus > 0;
+      if (lostFocus) G.focus--;
       G.lives = preset().lives + starterMod('bonusHp', 0);
       G.livesMax = Math.max(G.livesMax, G.lives);
       G.shieldCharges = Math.min(G.shieldCharges, shieldCap());
@@ -2804,7 +2979,9 @@ function loseLife(cause = 'MISSED BALL', shot = null) {
       buildLevel(G.level);
       serve();
       setAnnounce('alert', '#ff8a65', 'KNOCKED OUT!',
-        'THE TREE ABSORBED IT — LOST: ' + lost.join(' · '), 3.6, 'RETRYING THE WAVE WITH FULL LIVES');
+        'YOUR BUILD SURVIVES — UNSPENT RESONANCE LOST'
+        + (lostLvls ? ' · ' + lostLvls + ' BANKED LEVEL' + (lostLvls > 1 ? 'S' : '') : '')
+        + (lostFocus ? ' · 1 FOCUS' : ''), 3.6, 'RETRYING THE WAVE WITH FULL LIVES');
       return;
     }
     G.state = 'gameover'; G.stateT = 0;
@@ -3141,6 +3318,7 @@ function disperseSwarm() {
 // disperse the swarm and let the crosser-exempt clear take the wave.
 function completeProtect(O, name) {
   O.done = true;
+  resEvent('objective'); // AFT-009R P2: a protected life is resonance
   const fr = O.friendly;
   const px = fr ? fr.bx + G.fx : W / 2, py = fr ? fr.by + G.fy : H * 0.3;
   G.score += 600;
@@ -3180,6 +3358,7 @@ function friendlyFaints(fr) {
 function completeNonAttrition(O, name) {
   O.done = true;
   O.progress = 1;
+  resEvent('objective'); // AFT-009R P2: an authored win is resonance
   statsObjective(O.type, true);
   G.score += Math.round(600 * scoreMult());
   if (G.mode === 'classic') {
@@ -3293,6 +3472,7 @@ function updateObjective(dt) {
     if (O.spawnT <= 0 && aliveFlyers < 14) { spawnReinforcement(); O.spawnT = 5.5; }
     if (O.t >= O.dur) {
       O.done = true;
+      resEvent('objective'); // AFT-009R P2: outlasting the swarm is resonance
       // the swarm DISPERSES: remaining flyers migrate away as fleeing
       // crossers (no flight slot → crosser-exempt clear takes the wave)
       for (const b of G.bricks) {
@@ -3517,6 +3697,7 @@ function jumpToBossPhase(round, phase) {
 // Phase 2 flips the drive direction for the first non-ladder formats.
 function startFinaleBeat(i) {
   const F = G.finale; if (!F || i === F.beat) return;
+  if (i > F.beat) resEvent('beat'); // AFT-009R P2: an earned beat is resonance
   F.beatClocks[F.beatKey] = +(((F.beatClocks[F.beatKey] || 0) + F.beatT)).toFixed(1);
   F.beat = i; F.beatT = 0;
   const fmt = FINALE_FORMATS[F.format] || FINALE_FORMATS.ladder;
@@ -5038,6 +5219,13 @@ function update(dt) {
       G.combatNotice.t -= dt;
       if (G.combatNotice.t <= 0) G.combatNotice = null;
     } else if (G.combatNotice.t > 2.2) G.combatNotice.t = 2.2; // never hoard a stale queue
+  }
+  // AFT-009R P2: a queued attunement level opens at the first combat-safe
+  // beat. DORMANT under the suite (like reveals) — tests opt in via
+  // window.__SUITE_ATTUNE, or drive presentAttunementLevel() directly.
+  if (G.attune && G.attune.pending > 0 && attuneSafeNow()
+    && !(typeof window !== 'undefined' && window.__SUITE && !window.__SUITE_ATTUNE)) {
+    presentAttunementLevel();
   }
   updateAmbient(dt, G.state === 'menu' || G.state === 'dex' ? 0 : regionIdx(G.level));
 
@@ -7586,8 +7774,14 @@ function settleStageResolution() {
       statsLifeGain('aegisX');
       addFloater(W / 2, H * 0.42, PATHS.aegis.tiers[3].name + ' — SEGMENT RESTORED', '#66bb6a', 20);
     }
-    // draft: advance one of up to three paths (skip maxed ones)
-    rollUpgradeChoices();
+    // AFT-009R P3: ordinary stages deal NO draft — the frequent picks ride
+    // the attunement levels now. A REALM FINALE opens THE AETHER FORGE
+    // (its mastery-sized Refine hand keeps AFT-020's wider-draft reward);
+    // the Rift's secret bounty draft is untouched.
+    G.upgradeChoices = null;
+    G.forge = (clearedStage === 2 && !secretVictory) ? { step: 'menu' } : null;
+    if (clearedStage === 2) G.focus = Math.min(3, (G.focus || 0) + 1); // AFT-009R P5: +1 Focus per realm, cap 3
+    if (secretVictory) rollUpgradeChoices();
     if (secretVictory) {
       G.secret.completed = true;
       G.secret.vmax = false; // the fight is won — drop the rift background
@@ -7597,8 +7791,7 @@ function settleStageResolution() {
     }
     // The constellation is the primary choice surface for every normal hand —
     // tiers, bridges, superskills, and satellites all live on the map now.
-    upgradeTreeOpen = G.mode === 'junkie' && !!G.upgradeChoices &&
-      G.upgradeChoices.every(c => c.pathKey || c.web || c.stack);
+    upgradeTreeOpen = false; // AFT-009R P4: cards are the one installation surface
     draftSel = null; // nothing inspected yet on a fresh draft
     if (upgradeTreeOpen) syncTreeSelectionToDraft();
     G.rerolled = false; // bonus drafts are normal, rerollable hands

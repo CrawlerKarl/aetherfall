@@ -4566,6 +4566,10 @@ function drawAnnounce() {
   // AFT-002: the reveal scene owns the frame — its panel IS the boss card;
   // the strip would just bleed through the scrim underneath it.
   if (G.reveal) return;
+  // AFT-009R P1: the draft/Forge is a full-screen decision — a stale TRIAL
+  // or region card ghosting through the three-card stack is pure noise.
+  // The card's timer keeps draining in update, so nothing is hoarded.
+  if (G.state === 'upgrade') return;
   // LIVE COMBAT never gets a banner in the flight lane: while playing,
   // everything but a hero announcement (boss-round reveals) renders as a
   // compact strip tucked under the HUD, sliding in from the top. The centre
@@ -5500,6 +5504,7 @@ function drawHUD() {
     }
   }
   drawHurtHealth();
+  drawResonanceMeter(); // AFT-009R P2: the attunement fill rides the HUD pass
 }
 function drawBrickBehaviorLegend() {
   if (G.mode !== 'classic' || stageIdx(G.level) === 2 || (G.state !== 'play' && G.state !== 'serve')) return;
@@ -8682,6 +8687,7 @@ function drawFullUpgradeTree() {
   // three installable choices are always fully legible
   offerPills.forEach(p => drawOfferPill(p[0], p[1], p[2]));
 
+  if (treeListMode) drawTreeList(T); // AFT-009R P4: the phone list reading covers the map
   drawTreeCameraControls(T);
   drawTreeDetail(T);
   const cb = T.close;
@@ -8694,8 +8700,60 @@ function drawFullUpgradeTree() {
   ctx.restore();
 }
 
+// AFT-009R P4: THE JOURNAL LIST — every path, bridge, fusion and apex as a
+// big touch row over an opaque sheet (the map keeps its camera underneath;
+// LIST/MAP toggles, drag scrolls — no pinch anywhere). Filters ALL / OWNED /
+// NEXT; undiscovered fusions are ??? silhouettes with their reveal
+// condition as the hint; the header carries the build identity and the
+// NEXT REACHABLE transformation.
+function drawTreeList(T) {
+  const LL = treeListLayout(T);
+  ctx.save();
+  roundRect(T.map.x, T.map.y, T.map.w, T.map.h, 14);
+  ctx.fillStyle = 'rgba(7,12,32,0.985)'; ctx.fill();
+  ctx.clip();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  const ownedPaths = PATH_KEYS.filter(k => pathLvl(k) > 0);
+  const idName = ownedPaths.slice().sort((a, b) => pathLvl(b) - pathLvl(a)).slice(0, 2).map(skinPathName).join(' · ');
+  fitLabel((idName || 'FIRST ATTUNEMENT') + '  ·  NEXT: ' + nextReachableTransformation(),
+    T.map.x + 10, T.map.y + 28, { size: 9, min: 7.5, weight: 800, color: '#9fb2c8', align: 'left', maxW: T.map.w - 20 });
+  for (const ch of LL.chips) {
+    const on = treeListFilter === ch.f;
+    roundRect(ch.x, ch.y, ch.w, ch.h, 13);
+    ctx.fillStyle = on ? 'rgba(128,216,255,0.26)' : 'rgba(255,255,255,0.06)'; ctx.fill();
+    ctx.lineWidth = 1.2; ctx.strokeStyle = on ? '#80d8ff' : 'rgba(255,255,255,0.25)'; ctx.stroke();
+    ctx.textAlign = 'center';
+    ctx.font = '800 9px Orbitron, sans-serif'; ctx.fillStyle = on ? '#e0f7ff' : '#8fa4bd';
+    ctx.fillText(ch.f.toUpperCase(), ch.x + ch.w / 2, ch.y + ch.h / 2 + 1);
+  }
+  const entries = treeListEntries();
+  for (let i = 0; i < entries.length; i++) {
+    const r = LL.row(i);
+    if (r.y + r.h < LL.top - 2 || r.y > T.map.y + T.map.h) continue;
+    const en = entries[i];
+    const sel = sameTreeSel(treeSel, en.sel);
+    roundRect(r.x, r.y, r.w, r.h, 10);
+    ctx.fillStyle = sel ? 'rgba(26,22,56,0.95)' : 'rgba(12,16,38,0.85)'; ctx.fill();
+    ctx.lineWidth = sel ? 2 : 1.1;
+    ctx.strokeStyle = sel ? '#ffffff' : en.owned ? en.color : en.reachable ? en.color + '99' : 'rgba(255,255,255,0.14)';
+    ctx.stroke();
+    const bd = iconBadge(en.icon, en.color, 13, en.owned || en.reachable ? 'lit' : 'dim');
+    ctx.globalAlpha = en.owned ? 1 : en.reachable ? 0.85 : 0.5;
+    ctx.drawImage(bd, r.x + 10, r.y + r.h / 2 - bd.height / 2);
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'left';
+    ctx.font = '900 11px Orbitron, sans-serif';
+    ctx.fillStyle = en.owned ? '#fff' : en.reachable ? '#e3f2fd' : '#7e93ad';
+    ctx.fillText(en.name, r.x + 44, r.y + r.h / 2 - 9, r.w * 0.5);
+    ctx.font = '800 8px Orbitron, sans-serif'; ctx.fillStyle = en.color;
+    ctx.fillText(en.status, r.x + 44, r.y + r.h / 2 + 5, r.w * 0.45);
+    fitLabel(en.hint || '', r.x + r.w - 10, r.y + r.h / 2 + 5,
+      { size: 8.5, min: 7, weight: 600, family: 'Verdana, sans-serif', color: '#7e93ad', align: 'right', maxW: r.w * 0.42 });
+  }
+  ctx.restore();
+}
 function drawTreeCameraControls(T) {
-  const controls = [[T.zoomOut, '−'], [T.zoomIn, '+'], [T.fit, 'FIT'], [T.focus, 'FOCUS']];
+  const controls = [[T.zoomOut, '−'], [T.zoomIn, '+'], [T.fit, 'FIT'], [T.focus, 'FOCUS'], [T.list, treeListMode ? 'MAP' : 'LIST']];
   ctx.save();
   for (const [b, label] of controls) {
     const hov = inRect(mouseX, lastMouseY, b);
@@ -8706,10 +8764,11 @@ function drawTreeCameraControls(T) {
     ctx.font = `800 ${label.length > 1 ? 7.5 : 15}px Orbitron, sans-serif`;
     ctx.fillStyle = '#e3f2fd'; ctx.fillText(label, b.x + b.w / 2, b.y + b.h / 2 + (label === '−' ? -1 : 0));
   }
-  const last = T.focus;
+  const last = T.list;
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.font = '700 7.5px Orbitron, sans-serif';
   ctx.fillStyle = 'rgba(179,229,252,0.75)';
-  ctx.fillText(Math.round(treeZoom * 100) + '% · DRAG · PINCH', last.x + last.w + 8, last.y + last.h / 2,
+  ctx.fillText(treeListMode ? 'DRAG SCROLLS' : Math.round(treeZoom * 100) + '% · DRAG · PINCH',
+    last.x + last.w + 8, last.y + last.h / 2,
     Math.max(0, T.map.x + T.map.w - (last.x + last.w + 14)));
   ctx.restore();
 }
@@ -8717,24 +8776,28 @@ function drawTreeCameraControls(T) {
 // The shared REROLL / INSTALL action row at the panel's foot — tier and web
 // details both end in exactly these two actions.
 function drawTreeDetailButtons(T, offered, chosen, offer, accent) {
-  const rr = T.reroll, canRR = !G.rerolled && !G.secret.rewardDraft;
+  const rr = T.reroll, canRR = (G.focus || 0) > 0 && !G.secret.rewardDraft && !!G.upgradeChoices;
   const hovRR = canRR && inRect(mouseX, lastMouseY, rr);
   roundRect(rr.x, rr.y, rr.w, rr.h, 11);
   ctx.fillStyle = hovRR ? 'rgba(255,213,79,0.22)' : 'rgba(255,255,255,0.07)'; ctx.fill();
   ctx.lineWidth = 1.3; ctx.strokeStyle = canRR ? (hovRR ? '#ffd54f' : 'rgba(255,213,79,0.55)') : 'rgba(255,255,255,0.15)'; ctx.stroke();
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.font = `800 ${T.compact ? 10 : 9}px Orbitron, sans-serif`; ctx.fillStyle = canRR ? '#ffd54f' : '#546e7a';
-  ctx.fillText(canRR ? (IS_TOUCH ? 'REROLL' : 'REROLL · R') : 'REROLLED', rr.x + rr.w / 2, rr.y + rr.h / 2 + 1, rr.w - 10);
+  ctx.fillText(canRR ? 'FOCUS ×' + G.focus + (IS_TOUCH ? '' : ' · R') : 'NO FOCUS', rr.x + rr.w / 2, rr.y + rr.h / 2 + 1, rr.w - 10);
 
-  const cf = T.confirm, canCF = chosen;
-  const hovCF = canCF && inRect(mouseX, lastMouseY, cf);
-  if (canCF) { ctx.shadowColor = accent; ctx.shadowBlur = hovCF ? 18 : 10; }
+  // AFT-009R P4: the constellation is a JOURNAL — the action slot returns
+  // to the cards (the one installation surface); selecting an offer here
+  // still primes the card screen's INSTALL.
+  const cf = T.confirm;
+  const hovCF = inRect(mouseX, lastMouseY, cf);
+  const hasHand = !!G.upgradeChoices;
+  if (chosen) { ctx.shadowColor = accent; ctx.shadowBlur = hovCF ? 18 : 10; }
   roundRect(cf.x, cf.y, cf.w, cf.h, 11);
-  ctx.fillStyle = canCF ? (hovCF ? accent + '55' : accent + '34') : 'rgba(255,255,255,0.06)'; ctx.fill();
+  ctx.fillStyle = hovCF ? accent + '3c' : 'rgba(255,255,255,0.08)'; ctx.fill();
   ctx.shadowBlur = 0;
-  ctx.lineWidth = canCF ? 2 : 1.2; ctx.strokeStyle = canCF ? '#ffffff' : 'rgba(255,255,255,0.15)'; ctx.stroke();
-  ctx.font = `900 ${T.compact ? 10 : 9}px Orbitron, sans-serif`; ctx.fillStyle = canCF ? '#fff' : '#607d8b';
-  ctx.fillText(canCF ? (IS_TOUCH ? 'INSTALL OPTION ' + (offer + 1) : 'INSTALL · ENTER') : offered ? 'SELECT THIS OPTION' : 'CHOOSE AN OPTION TAG',
+  ctx.lineWidth = chosen ? 2 : 1.3; ctx.strokeStyle = chosen ? '#ffffff' : 'rgba(255,255,255,0.3)'; ctx.stroke();
+  ctx.font = `900 ${T.compact ? 10 : 9}px Orbitron, sans-serif`; ctx.fillStyle = '#fff';
+  ctx.fillText(hasHand ? (chosen ? 'BACK TO CARDS — INSTALL THERE' : 'BACK TO CARDS') : 'CLOSE JOURNAL',
     cf.x + cf.w / 2, cf.y + cf.h / 2 + 1, cf.w - 10);
 }
 
@@ -9532,6 +9595,143 @@ function drawResults() {
   if (t > 0.6) pulse(IS_TOUCH ? 'TAP TO CONTINUE' : 'CLICK TO CONTINUE', H * (short ? 0.9 : 0.88));
 }
 
+// AFT-009R P1: THE ATTUNEMENT CARD — one anatomy for every offer on the
+// phone draft: KIND tag (NEW / UPGRADE / CAPSTONE / MASTERY / EVOLVE),
+// name, one plain effect sentence, current → new value, and a synergy
+// hint. Drawn from draftCardModel(); render never reaches into the choice
+// payload here, so tiers, web nodes, stacks and secrets read identically.
+function drawAttunementCard(c, r, i, a) {
+  const m = draftCardModel(c);
+  const sel = draftSel === i;
+  const hov = sel || inRect(mouseX, lastMouseY, r);
+  ctx.save();
+  ctx.globalAlpha = a * (draftSel != null && !sel ? 0.55 : 1);
+  if (hov) { ctx.shadowColor = sel ? '#ffffff' : m.color; ctx.shadowBlur = sel ? 26 : 20; }
+  roundRect(r.x, r.y, r.w, r.h, 14);
+  ctx.fillStyle = hov ? 'rgba(22,18,48,0.97)' : 'rgba(11,10,30,0.94)'; ctx.fill();
+  ctx.lineWidth = sel ? 3 : hov ? 2.4 : 1.6;
+  ctx.strokeStyle = sel ? '#ffffff' : m.color; ctx.stroke();
+  ctx.shadowBlur = 0;
+  drawDraftCardEnergy(r, m.color, hov, sel, i);
+  drawDraftBadge(m.icon, r.x + 34, r.y + r.h / 2, 18, m.color, hov, i);
+  const tx = r.x + 64, tw = r.w - 74;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.font = '900 8px Orbitron, sans-serif';
+  const tagW = ctx.measureText(m.tag).width + 12;
+  roundRect(tx, r.y + 8, tagW, 13, 6.5);
+  ctx.fillStyle = m.color; ctx.fill();
+  ctx.fillStyle = '#0b0e20';
+  ctx.fillText(m.tag, tx + 6, r.y + 15);
+  ctx.font = '800 8px Orbitron, sans-serif'; ctx.fillStyle = '#8fa4bd';
+  ctx.fillText(m.head || '', tx + tagW + 8, r.y + 15, tw - tagW - 10);
+  ctx.font = '900 14.5px Orbitron, sans-serif'; ctx.fillStyle = '#fff';
+  ctx.fillText(m.name, tx, r.y + 33, tw);
+  ctx.font = bodyFont(10, 600); ctx.fillStyle = '#dde5ee';
+  wrapText(m.sentence || '', tw).slice(0, 2).forEach((l, li) => ctx.fillText(l, tx, r.y + 50 + li * 12, tw));
+  if (r.h >= 92 && m.delta) {
+    ctx.font = '800 8.5px Orbitron, sans-serif'; ctx.fillStyle = m.color;
+    ctx.fillText(m.delta, tx, r.y + r.h - 24, tw);
+  }
+  if (r.h >= 80 && m.hint) {
+    ctx.font = bodyFont(8.5, 600); ctx.fillStyle = '#7e93ad';
+    ctx.fillText(m.hint, tx, r.y + r.h - 11, tw);
+  }
+  ctx.restore();
+}
+// AFT-009R P1: the build-context row above the phone draft — four path
+// SLOTS (the coming four-path cap's visual anchor), the current build
+// identity, and the reroll resource. Reads real state only; a run
+// grandfathered past four slots shows the overflow honestly.
+// AFT-009R P2: THE RESONANCE METER — a slim always-on readout of the next
+// attunement level: bottom-left above the status chips on touch, under the
+// score block on desktop. Reads state only; the fill is contribution, so
+// it visibly surges on kills, boss deciles, phases and objectives.
+function drawResonanceMeter() {
+  const A = G.attune;
+  if (!A || (G.state !== 'play' && G.state !== 'serve')) return;
+  const w = 92, h = 5;
+  // just above the status-chips row in every layout (the upper-left column
+  // belongs to score/COMBO/RIFT KEY — AFT-022 F3's rule)
+  const x = 14 + SAFE_L, y = FLOOR() - 52;
+  ctx.save();
+  roundRect(x, y, w, h, 2.5);
+  ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill();
+  const frac = Math.max(0, Math.min(1, A.res / Math.max(1, A.need)));
+  if (frac > 0.01) {
+    roundRect(x, y, w * frac, h, 2.5);
+    ctx.fillStyle = A.pending > 0 ? '#ffd54f' : '#80d8ff'; ctx.fill();
+  }
+  ctx.font = '800 8px Orbitron, sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = A.pending > 0 ? '#ffd54f' : '#9fb2c8';
+  ctx.fillText(A.pending > 0 ? 'ATTUNE READY' : 'ATTUNE ' + (A.level + 1), x + w + 7, y + 3);
+  ctx.restore();
+}
+function drawBuildMetaRow(L) {
+  const r0 = L.card(0);
+  const y = r0.y - 16;
+  const owned = PATH_KEYS.filter(k => pathLvl(k) > 0);
+  ctx.save();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  let x = r0.x + 2;
+  for (let s = 0; s < 4; s++) {
+    const k = owned[s];
+    ctx.beginPath(); ctx.arc(x + 7, y, 6, 0, Math.PI * 2);
+    ctx.fillStyle = k ? PATHS[k].color : 'rgba(255,255,255,0.10)'; ctx.fill();
+    ctx.lineWidth = 1.2; ctx.strokeStyle = k ? '#ffffffaa' : 'rgba(255,255,255,0.25)'; ctx.stroke();
+    x += 20;
+  }
+  if (owned.length > 4) {
+    ctx.font = '800 9px Orbitron, sans-serif'; ctx.fillStyle = '#ffd54f';
+    ctx.fillText('+' + (owned.length - 4), x + 2, y + 1); x += 18;
+  }
+  const idName = owned.slice().sort((a, b) => pathLvl(b) - pathLvl(a)).slice(0, 2).map(skinPathName).join(' · ');
+  ctx.font = '800 9px Orbitron, sans-serif'; ctx.fillStyle = '#9fb2c8';
+  ctx.fillText(idName || 'FIRST ATTUNEMENT', x + 8, y + 1, Math.max(40, r0.x + r0.w - x - 96));
+  ctx.textAlign = 'right';
+  ctx.fillStyle = (G.focus || 0) > 0 ? '#80d8ff' : '#546e7a';
+  ctx.fillText('FOCUS ×' + (G.focus || 0), r0.x + r0.w - 2, y + 1);
+  ctx.restore();
+}
+// AFT-009R P3: THE AETHER FORGE action menu — up to three big rows
+// (REFINE / LINK / EVOLVE); unavailable actions are OMITTED. The realm-3
+// first-link guarantee rides a ★ FIRST LINK chip on an ordered-first row.
+function drawForgeMenu(accent) {
+  const L = upgradeLayout();
+  const acts = forgeActions();
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = '800 11px Orbitron, sans-serif';
+  ctx.fillStyle = '#9fb2c8';
+  const r0 = L.card(0);
+  ctx.fillText('THE AETHER FORGE — ONE DECISION SHAPES THE NEXT REALM', W / 2, r0.y - 16, W * 0.94);
+  for (let i = 0; i < acts.length; i++) {
+    const a = acts[i], r = L.card(i);
+    const hov = inRect(mouseX, lastMouseY, r);
+    if (hov) { ctx.shadowColor = a.color; ctx.shadowBlur = 20; }
+    roundRect(r.x, r.y, r.w, r.h, 14);
+    ctx.fillStyle = hov ? 'rgba(22,18,48,0.97)' : 'rgba(11,10,30,0.94)'; ctx.fill();
+    ctx.lineWidth = hov ? 2.6 : 1.8; ctx.strokeStyle = a.color; ctx.stroke();
+    ctx.shadowBlur = 0;
+    drawDraftBadge(a.icon, r.x + 36, r.y + r.h / 2, 18, a.color, hov, i);
+    ctx.textAlign = 'left';
+    ctx.font = '900 16px Orbitron, sans-serif'; ctx.fillStyle = '#fff';
+    ctx.fillText(a.name, r.x + 68, r.y + r.h / 2 - 12, r.w - 80);
+    if (a.first) {
+      ctx.font = '900 8px Orbitron, sans-serif';
+      const fw = ctx.measureText('★ FIRST LINK').width + 12;
+      roundRect(r.x + 68 + ctx.measureText(a.name).width * 2 + 14, r.y + r.h / 2 - 18, fw, 13, 6.5);
+      ctx.fillStyle = a.color; ctx.fill();
+      ctx.fillStyle = '#0b0e20';
+      ctx.fillText('★ FIRST LINK', r.x + 74 + ctx.measureText(a.name).width * 2 + 14, r.y + r.h / 2 - 12);
+    }
+    ctx.font = bodyFont(10, 600); ctx.fillStyle = '#dde5ee';
+    wrapText(a.desc, r.w - 84).slice(0, 2).forEach((l, li) =>
+      ctx.fillText(l, r.x + 68, r.y + r.h / 2 + 8 + li * 12, r.w - 80));
+    ctx.textAlign = 'center';
+  }
+  ctx.restore();
+}
 function drawOverlays() {
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   if (G.state === 'menu') { drawMenu(); }
@@ -9587,26 +9787,44 @@ function drawOverlays() {
     dim(0.55);
     const draftShort = H < 520;
     const secretDraft = !!G.secret.rewardDraft;
+    const liveAttune = !!G.attuneLive; // AFT-009R P2: a mid-wave level, not a stage clear
     const wasBossStage = G.clearedStage === 2;
     const clearedGen = SKIN.gens[regionIdx(Math.max(1, G.level - 1))];
-    const clearY = draftShort ? 36 : H * 0.16;
-    const draftAccent = secretDraft ? '#d780ff' : wasBossStage ? clearedGen.accent : '#66bb6a';
-    drawDraftBackdrop(draftAccent);
-    title(secretDraft ? 'RIFT CONQUERED!' : wasBossStage ? clearedGen.name + ' CLEARED!' : 'STAGE CLEAR!',
-      clearY, Math.min(draftShort ? 30 : 40, W / 12), draftAccent);
+    // AFT-009R P6: the mid-wave attune header may never collide with the
+    // card stack on small phones — it anchors to the top card when the
+    // stack rides high (320×568 measured collision)
+    const attuneTopY = liveAttune && G.upgradeChoices ? upgradeLayout().card(0).y : H;
+    const clearY = draftShort ? 36 : Math.min(H * 0.16, Math.max(34, attuneTopY - 58));
+    const draftAccent = liveAttune ? '#80d8ff' : secretDraft ? '#d780ff' : wasBossStage ? clearedGen.accent : '#66bb6a';
+    if (!liveAttune) drawDraftBackdrop(draftAccent);
+    {
+      const tTxt = liveAttune ? 'ATTUNEMENT ' + ((G.attune && G.attune.presented) || 1)
+        : secretDraft ? 'RIFT CONQUERED!' : wasBossStage ? clearedGen.name + ' CLEARED!' : 'STAGE CLEAR!';
+      // AFT-009R P3: long realm names must FIT the phone width — size caps
+      // by measured length, never by the fixed W/12 alone
+      const tSize = Math.min(draftShort ? 30 : 40, W / 12, (W * 0.94) / (tTxt.length * 0.68));
+      title(tTxt, clearY, tSize, draftAccent);
+    }
+    if (liveAttune) {
+      ctx.font = '700 11px Orbitron, sans-serif';
+      ctx.fillStyle = '#9fb2c8';
+      ctx.fillText('THE FIGHT WAITS — CHOOSE, THEN RETURN', W / 2, clearY + (draftShort ? 22 : 24), W * 0.9);
+    } else {
     ctx.font = '700 15px Orbitron, sans-serif';
     ctx.fillStyle = '#ffd54f';
     ctx.fillText(secretDraft ? '+3000 SECRET BOSS BONUS' : '+' + (300 + (G.clearedStage || 0) * 250) + ' BONUS',
       W / 2, clearY + (draftShort ? 28 : 34));
+    }
     if (secretDraft && !draftShort) {
       ctx.font = '900 12px Orbitron, sans-serif'; ctx.fillStyle = '#80e8ff';
       ctx.fillText('CHOOSE ONE FORBIDDEN UPGRADE · THE NORMAL ' + (SKIN.secret.homeRegion || 'HOME') + ' DRAFT FOLLOWS', W / 2, clearY + 60, W * 0.92);
-    } else if (stageIdx(G.level) === 0 && !draftShort) {
+    } else if (!liveAttune && stageIdx(G.level) === 0 && !draftShort) {
       ctx.font = '900 16px Orbitron, sans-serif';
       ctx.fillStyle = genFor(G.level).accent;
       ctx.fillText('NEXT STOP: ' + genFor(G.level).name, W / 2, H * 0.16 + 62);
     }
-    if (!secretDraft) drawJourneyMap(clearY + (draftShort ? 56 : 86), draftShort || W < 560);
+    if (!secretDraft && !liveAttune) drawJourneyMap(clearY + (draftShort ? 56 : 86), draftShort || W < 560);
+    if (G.forge && G.forge.step === 'menu' && G.stateT > 0.5) drawForgeMenu(draftAccent);
     if (G.upgradeChoices && G.stateT > 0.8) {
       const a = Math.min(1, (G.stateT - 0.8) / 0.4);
       ctx.globalAlpha = a;
@@ -9617,9 +9835,13 @@ function drawOverlays() {
       // inspected it becomes THAT pick's place in its path — owned tiers
       // filled, the pick glowing, future tiers dim — so the player sees the
       // upgrade path right here without flipping to the FULL TREE screen
+      // AFT-009R P1: on the stacked PHONE draft the legacy header/tier-chain
+      // is replaced by the build-meta row + per-card RANK line — two
+      // authorities over one band was the exact P2-class collision AFT-021
+      // outlawed
       const headerY = L.card(0).y - (L.stacked || L.short ? 16 : 22);
       const selC = draftSel != null && G.upgradeChoices[draftSel];
-      if (!selC) {
+      if (!L.stacked) if (!selC) {
         const bounty = G.bonusPicks >= 2 ? 'RIFT BOUNTY — CHOOSE TWO'
           : G.bonusPicks === 1 ? 'RIFT BOUNTY — ONE MORE PICK' : null;
         if (bounty) { ctx.fillStyle = '#d780ff'; }
@@ -9668,8 +9890,11 @@ function drawOverlays() {
           ctx.fillText((ti === 3 ? '★ ' : '') + junkieTierName(selC.pathKey, ti), nx + nw / 2, headerY, nw - 8);
         }
       }
+      if (L.stacked) drawBuildMetaRow(L);
       for (let i = 0; i < G.upgradeChoices.length; i++) {
         const c = G.upgradeChoices[i], r = L.card(i);
+        // AFT-009R P1: phones draw EVERY offer through the one card anatomy
+        if (L.stacked) { drawAttunementCard(c, r, i, a); continue; }
         if (c.secret) {
           const scol = c.secret.color, sel = draftSel === i;
           const hov = sel || inRect(mouseX, lastMouseY, r);
@@ -9921,7 +10146,8 @@ function drawOverlays() {
       }
       // one reroll per draft — a dead hand shouldn't end the build
       const rr = L.reroll;
-      const canRR = !secretDraft && !G.rerolled;
+      const forgeBackBtn = G.forge && G.forge.step === 'hand' && G.forge.action !== 'refine';
+      const canRR = forgeBackBtn || (!secretDraft && (G.focus || 0) > 0);
       const hovRR = canRR && inRect(mouseX, lastMouseY, rr);
       ctx.globalAlpha = a * (canRR ? 1 : 0.35);
       roundRect(rr.x, rr.y, rr.w, rr.h, 16);
@@ -9932,7 +10158,7 @@ function drawOverlays() {
       ctx.stroke();
       ctx.font = '700 12px Orbitron, sans-serif';
       ctx.fillStyle = canRR ? '#ffd54f' : '#546e7a';
-      ctx.fillText(secretDraft ? 'FIXED SET' : canRR ? (IS_TOUCH ? 'REROLL' : 'REROLL (R)') : 'REROLLED', rr.x + rr.w / 2, rr.y + rr.h / 2 + 1, rr.w - 10);
+      ctx.fillText(forgeBackBtn ? '‹ BACK' : secretDraft ? 'FIXED SET' : canRR ? 'FOCUS ×' + G.focus + (IS_TOUCH ? '' : ' (R)') : 'NO FOCUS', rr.x + rr.w / 2, rr.y + rr.h / 2 + 1, rr.w - 10);
       // CONFIRM — the only thing that actually applies the inspected pick
       const cf = L.confirm, canCF = draftSel != null;
       const hovCF = canCF && inRect(mouseX, lastMouseY, cf);
@@ -9947,14 +10173,14 @@ function drawOverlays() {
       ctx.stroke();
       ctx.font = '800 12px Orbitron, sans-serif';
       ctx.fillStyle = canCF ? '#d7ffd9' : '#546e7a';
-      ctx.fillText(canCF ? (IS_TOUCH ? '✓ CONFIRM' : '✓ CONFIRM (ENTER)') : 'PICK A CARD', cf.x + cf.w / 2, cf.y + cf.h / 2 + 1, cf.w - 10);
+      ctx.fillText(canCF ? (IS_TOUCH ? '✓ INSTALL' : '✓ INSTALL (ENTER)') : 'PICK A CARD', cf.x + cf.w / 2, cf.y + cf.h / 2 + 1, cf.w - 10);
       ctx.globalAlpha = a;
       const tr = L.tree, hovTR = !secretDraft && inRect(mouseX, lastMouseY, tr);
       roundRect(tr.x, tr.y, tr.w, tr.h, 16);
       ctx.fillStyle = hovTR ? 'rgba(128,216,255,0.2)' : 'rgba(255,255,255,0.07)'; ctx.fill();
       ctx.lineWidth = 1.5; ctx.strokeStyle = secretDraft ? 'rgba(255,255,255,0.15)' : hovTR ? '#80d8ff' : 'rgba(255,255,255,0.35)'; ctx.stroke();
       ctx.font = '700 11px Orbitron, sans-serif'; ctx.fillStyle = secretDraft ? '#546e7a' : hovTR ? '#e0f7ff' : '#80d8ff';
-      ctx.fillText(secretDraft ? 'SECRET ONLY' : IS_TOUCH ? 'FULL TREE' : 'FULL TREE (T)', tr.x + tr.w / 2, tr.y + tr.h / 2 + 1, tr.w - 12);
+      ctx.fillText(secretDraft ? 'SECRET ONLY' : IS_TOUCH ? 'VIEW BUILD' : 'VIEW BUILD (T)', tr.x + tr.w / 2, tr.y + tr.h / 2 + 1, tr.w - 12);
       ctx.globalAlpha = 1;
       ctx.textAlign = 'center';
       if (upgradeTreeOpen) drawFullUpgradeTree();
