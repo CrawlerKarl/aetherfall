@@ -757,6 +757,17 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
   // ARE the rite (no wound), unqualified ones trickle ×0.25 attrition
   if (br.totem && riteState() && G.finale.beat === 0 && dmg < 90) {
     const R = G.finale.rite;
+    // AFT-011 targeted finale pacing: the three authored rites now wake in
+    // sequence. A sleeping Totem is ceremonial scenery — it cannot be
+    // chain-cleared by the same auto-fire burst that answers another rite.
+    if (!br.riteArmed) {
+      br.flash = 0.45;
+      if ((R.failCD || 0) <= 0) {
+        R.failCD = 1.1;
+        addFloater(br.bx + G.fx, br.by + G.fy - br.h / 2 - 12, 'THE NEXT RITE WAITS', '#90a4ae', 10);
+      }
+      return;
+    }
     let qualified = false;
     if (br.riteKind === 'opening') {
       const gapA = (G.time * 0.9) % (Math.PI * 2);
@@ -1107,10 +1118,11 @@ function damageBrick(br, dmg, sx, sy, element, meta = {}) {
     if (G.objective && G.objective.type === 'undercard' && !G.objective.done && !br.crosser && !br.friendly) {
       const O2 = G.objective;
       // AFT-021 P5: the crowd wants a SHOW, not a speedrun — smaller per-kill
-      // pops under a 0.09/s rate ceiling put the undercard at ~15-20s of
-      // sustained rhythm instead of one 8-second AoE dump
+      // AFT-011 targeted late-stage cleanup: the War Cradle undercard owns a
+      // 33s authored crowd clock. The former 0.05/s ceiling made every one
+      // of five seeds finish in 23-29s, below the 34-65s late-act band.
       if (O2.t0 == null) O2.t0 = G.time;
-      const crowdCeil = 0.05 * Math.max(0.5, G.time - O2.t0);
+      const crowdCeil = 0.03 * Math.max(0.5, G.time - O2.t0);
       O2.crowd = Math.min(1, Math.min((O2.crowd || 0) + 0.03 + (G.combo >= 5 ? 0.012 : 0), crowdCeil));
       O2.progress = O2.crowd;
       if (O2.crowd >= 1) completeNonAttrition(O2, O2.name || 'THE CROWD ROARS');
@@ -3680,14 +3692,18 @@ const FX_LADDER = { level: 0, changedAt: 0, belowSince: 0 };
 function effectsLevel() {
   if (SETTINGS.fx === 'full') return 0;
   if (SETTINGS.fx === 'reduced') return 2;
+  if (SETTINGS.fx === 'minimal') return 3; // AFT-025: pin the deepest rung
   // AUTO: ESCALATE on the fast 30-frame window (~0.5s — a boss entrance
   // spike degrades before the drop is felt), DE-ESCALATE only when the slow
   // 120-frame average also recovers — hysteresis in the right direction.
   // Work time alone misses GPU/compositor stalls on phones, so actual rAF
-  // cadence is an equal input: >20ms is below 50 FPS; >26ms is below 39 FPS.
+  // cadence is an equal input: >20ms is below 50 FPS; >26ms is below 39 FPS;
+  // >34ms (below ~29 FPS, sustained) is the rung-3 line — the phone is
+  // losing the fight and the frame gets flattened to its cheapest honest form.
   const workHot = Math.max(PERF.recent(30), PERF.avg());
   const cadenceHot = Math.max(PERF.cadenceRecent(30), PERF.cadenceAvg());
-  const raw = (workHot > 22 || cadenceHot > 26 || fxLoad() > 1.6) ? 2 // emission + resolution
+  const raw = (workHot > 30 || cadenceHot > 34 || fxLoad() > 2.2) ? 3   // background plate + deep trims
+    : (workHot > 22 || cadenceHot > 26 || fxLoad() > 1.6) ? 2 // emission + resolution
     : (workHot > 15 || cadenceHot > 20 || fxLoad() > 1.15) ? 1 : 0;   // bloom + big glows first
   const L = FX_LADDER, t = performance.now();
   if (raw > L.level) { L.level = raw; L.changedAt = t; L.belowSince = 0; }
@@ -3699,7 +3715,14 @@ function effectsLevel() {
   } else L.belowSince = 0;
   return L.level;
 }
-function fxWantedScale() { return effectsLevel() >= 2 ? 0.75 : 1; }
+// Rung 3 drops the backing store further ONLY where density headroom exists:
+// at DPR 2 (retina phones) 0.62 still renders above 1.2 device-px per CSS px,
+// while a DPR-1 device is already sub-native at 0.75 — going lower there
+// would visibly soften the HUD text the ladder exists to protect.
+function fxWantedScale() {
+  const lvl = effectsLevel();
+  return lvl >= 3 ? (DPR >= 2 ? 0.62 : 0.75) : lvl >= 2 ? 0.75 : 1;
+}
 
 // ---- AFT-002: THE BOSS REVEAL — a separate scene, not a combat layer ----
 // Freeze combat, show the full-resolution portrait with a dedicated info
@@ -4569,9 +4592,21 @@ function updateRite(dt) {
   if (R.failCD > 0) R.failCD -= dt;
   if (R.tagCD > 0) R.tagCD -= dt;
   if (F.beat === 0) {
+    if ((R.activeRite || 0) < 3 && F.beatT >= R.armAt) {
+      const active = G.bricks.find(b => !b.dead && b.totem && b.riteOrder === R.activeRite);
+      if (active && !active.riteArmed) {
+        active.riteArmed = true;
+        R.activeRite++;
+        R.armAt += R.interlude;
+        setCombatNotice('RITE ' + ((active.riteOrder || 0) + 1) + '/3 AWAKENS · '
+          + String(active.riteKind || '').toUpperCase(), '#5affc3', 2.1);
+        ringFx(active.bx + G.fx, active.by + G.fy, '#5affc3', 8, 110, 4, 0.5);
+        SFX.power();
+      }
+    }
     // the growing roots: closing resets that rite's progress, loudly
     for (const b of G.bricks) {
-      if (b.dead || !b.totem || b.riteKind !== 'root') continue;
+      if (b.dead || !b.totem || !b.riteArmed || b.riteKind !== 'root') continue;
       b.riteRoot += dt / 9;
       if (b.riteRoot >= 1) {
         b.riteRoot = 0;
@@ -6923,6 +6958,11 @@ function update(dt) {
         // (+15% at full pressure) — the apex is a weapon-form dance, both
         // halves of which now deal damage
         if (!L.charged && upgN('warmachine')) dmg *= 1 + 0.22 * (G.railPressure || 0);
+        // AFT-011 targeted apex cleanup: seven matched raid seeds left WAR
+        // MACHINE only 2% faster than CELESTIAL. A flat +15% on its two
+        // weapon forms is stable and legible; unlike a weapon-clock change it
+        // cannot compound charge thresholds, cooldowns, cooling and travel.
+        if (upgN('warmachine')) dmg *= 1.15;
         if (L.heavy) dmg *= 1.15;
         if (L.nova) dmg *= 2;
         if (L.calib) dmg *= 1.6; // CALIBRATED BARRAGE: primed volley

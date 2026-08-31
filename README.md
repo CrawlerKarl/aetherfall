@@ -12,7 +12,7 @@ engine:
 - **BLASTER** — ball-less wall clearing with a piercing charge shot.
 
 Every creature, vessel, sentinel, sovereign, weapon relic, missile, and ship
-fitting ships hand-finished art in the same Relicforge style, with true
+fitting ships hand-finished WebP art in the same Relicforge style, with true
 prismatic RADIANT vessel forms. 100% vanilla JS + Canvas — no build step, no
 dependencies, no network calls.
 

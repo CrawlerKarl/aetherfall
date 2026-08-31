@@ -64,6 +64,15 @@ function drawBackground() {
   // the SCENE DIRECTOR keys the sky by region AND stage — arrival daylight,
   // legendary night so the brand look survives.
   buildBackground(genIdx, onMenu ? 2 : stageIdx(G.level));
+  // Rung 3 (AFT-025): the whole sky stack — sky, stars, scenery, wash —
+  // pre-composites into ONE cached plate, so a struggling phone paints one
+  // full-screen layer instead of four plus ambient motes. Twinkle and the
+  // paddle parallax freeze (decorative only); the plate rebuilds only on a
+  // scene or viewport change.
+  if (!onMenu && effectsLevel() >= 3) {
+    ctx.drawImage(backgroundPlate(), 0, 0, W, H);
+    return;
+  }
   ctx.drawImage(bgSky, 0, 0, W, H);
   const par = (G.paddle.x - W / 2) / (W / 2); // parallax from paddle position
   if (SCENE_DARK > 0.05) for (const s of stars) {
@@ -75,12 +84,31 @@ function drawBackground() {
   }
   ctx.globalAlpha = 1;
   ctx.drawImage(bgScenery, -par * 12 - W * 0.015, 0, W * 1.03, H);
-  if (!onMenu) {
-    // combat contrast wash (cached) — bright skies never swallow the sprites
-    if (bgWash) ctx.drawImage(bgWash, 0, 0, W, H);
-    drawAtmosphere(genIdx); // depth wash over gameplay scenes
-  }
+  // combat contrast wash + atmosphere (one cached canvas since AFT-025) —
+  // bright skies never swallow the sprites; the menu keeps its postcard look
+  if (!onMenu && bgWash) ctx.drawImage(bgWash, 0, 0, W, H);
   drawAmbient(genIdx);
+}
+let bgPlate = null, bgPlateKey = '';
+function backgroundPlate() {
+  const key = bgGen + '|' + W + 'x' + H;
+  if (bgPlateKey === key && bgPlate) return bgPlate;
+  bgPlateKey = key;
+  bgPlate = document.createElement('canvas'); bgPlate.width = W; bgPlate.height = H;
+  const c = bgPlate.getContext('2d');
+  c.drawImage(bgSky, 0, 0, W, H);
+  if (SCENE_DARK > 0.05) {
+    c.fillStyle = '#cfd8ff';
+    for (const s of stars) {
+      const tw = 0.75 + 0.25 * Math.sin(s.tw); // frozen mid-twinkle
+      c.globalAlpha = s.z * tw * 0.75 * SCENE_DARK;
+      c.fillRect(s.x, s.y, s.z * 2.2, s.z * 2.2);
+    }
+    c.globalAlpha = 1;
+  }
+  c.drawImage(bgScenery, -W * 0.015, 0, W * 1.03, H);
+  if (bgWash) c.drawImage(bgWash, 0, 0, W, H);
+  return bgPlate;
 }
 
 // armored "guardian wall" bricks shift colour as you whittle their plating down,
@@ -293,28 +321,9 @@ function drawBloom() {
   ctx.restore();
 }
 
-// ---- ATMOSPHERE: a cached per-region wash (warm horizon glow + top darken)
-// that adds depth and mood over the flat scenery. Rebuilt only on region /
-// resize change, never per frame.
-let atmoCanvas = null, atmoKey = '';
-function drawAtmosphere(genIdx) {
-  const key = genIdx + 'x' + W + 'x' + H;
-  if (atmoKey !== key) {
-    atmoKey = key;
-    atmoCanvas = document.createElement('canvas'); atmoCanvas.width = W; atmoCanvas.height = H;
-    const c = atmoCanvas.getContext('2d');
-    const accent = (SKIN.gens[genIdx] && SKIN.gens[genIdx].accent) || '#7ee08a';
-    // horizon glow: a soft band of the region accent low on the screen
-    const hg = c.createRadialGradient(W / 2, H * 0.9, 10, W / 2, H * 0.9, H * 0.7);
-    hg.addColorStop(0, accent + '30'); hg.addColorStop(0.5, accent + '10'); hg.addColorStop(1, accent + '00');
-    c.fillStyle = hg; c.fillRect(0, 0, W, H);
-    // top darken for depth
-    const tg = c.createLinearGradient(0, 0, 0, H * 0.5);
-    tg.addColorStop(0, 'rgba(2,4,14,0.5)'); tg.addColorStop(1, 'rgba(2,4,14,0)');
-    c.fillStyle = tg; c.fillRect(0, 0, W, H * 0.5);
-  }
-  ctx.drawImage(atmoCanvas, 0, 0);
-}
+// ---- ATMOSPHERE: the warm horizon glow + top darken now bakes directly
+// into bgWash (scenery.js, AFT-025) so gameplay paints one combined wash
+// layer per frame instead of two.
 // a spiky energy orb baked in an arbitrary type COLOR and radius — enemy shots
 // now come in every type's colour (electric yellow, water blue, …) instead of
 // one red. Cached per (color, r, spikes).
@@ -564,9 +573,7 @@ const AETHER_RELIC_SIZE = Object.freeze({
 function aetherWeaponImage(path) {
   if (SKIN.id !== 'aetherfall' || !path) return null;
   if (!aetherWeaponImages[path]) {
-    const img = new Image();
-    img.src = path;
-    aetherWeaponImages[path] = img;
+    aetherWeaponImages[path] = loadAetherImage(path, 'weapon');
   }
   return aetherWeaponImages[path];
 }
@@ -596,33 +603,53 @@ function aetherWeaponTint(img, color) {
     return c;
   } catch (e) { return null; }
 }
+// The relic body — halo, tier echoes, and additive tint — is BAKED once per
+// (image, color, tier, size-bucket) and drawn with ONE plain drawImage per
+// projectile. The original path set ctx.shadowBlur per shot per frame, which
+// under AETHERFALL (every enemy shot, typed bolt, and missile carries relic
+// art) is exactly the per-entity GPU-blur stall the fxCache family exists to
+// Size buckets exist because the halo ratio is size-dependent below 32px
+// (blur = max(8, size*0.25)); three buckets keep small pellets glowing.
+const aetherRelicBakes = {};
+function aetherRelicBake(img, color, tier, size) {
+  const bucket = size < 20 ? 0 : size < 32 ? 1 : 2;
+  const key = img.src + '|' + color + '|' + tier + '|' + bucket;
+  const hit = aetherRelicBakes[key];
+  if (hit) return hit;
+  const keys = Object.keys(aetherRelicBakes);
+  if (keys.length > 96) for (const k of keys) delete aetherRelicBakes[k]; // rebake is cheap
+  const N = img.naturalWidth; // production weapon art is 128px
+  const q = bucket === 0 ? 0.5 : bucket === 1 ? 0.31 : 0.25; // halo ratio ≈ max(8, s*0.25)/s at bucket centers
+  const pad = Math.ceil(N * q) + 2, S = N + pad * 2;
+  const tint = aetherWeaponTint(img, color);
+  const c = document.createElement('canvas'); c.width = c.height = S;
+  const b = c.getContext('2d');
+  b.translate(S / 2, S / 2);
+  if (tier >= 3 && tint) {
+    b.globalCompositeOperation = 'lighter';
+    b.globalAlpha = 0.16;
+    b.drawImage(tint, -N / 2 - N * 0.16, -N / 2 + N * 0.12, N, N);
+    b.drawImage(tint, -N / 2 + N * 0.16, -N / 2 + N * 0.12, N, N);
+    b.globalCompositeOperation = 'source-over';
+  }
+  b.globalAlpha = 1;
+  b.shadowColor = color; b.shadowBlur = N * q;
+  b.drawImage(img, -N / 2, -N / 2, N, N);
+  b.shadowBlur = 0;
+  if (tint) {
+    b.globalCompositeOperation = 'lighter';
+    b.globalAlpha = tier >= 2 ? 0.25 : 0.18;
+    b.drawImage(tint, -N / 2, -N / 2, N, N);
+  }
+  const rec = { c, scale: S / N };
+  aetherRelicBakes[key] = rec;
+  return rec;
+}
 function drawAetherRelic(img, x, y, size, color, tier = 1) {
   if (!img || !img.complete || !img.naturalWidth) return false;
-  const tint = aetherWeaponTint(img, color);
-  const inheritedAlpha = ctx.globalAlpha;
-  ctx.save();
-  ctx.translate(x, y);
-  // Evolved attacks retain the same authored object; subtle paired echoes
-  // communicate tier without replacing its material construction.
-  if (tier >= 3) {
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = inheritedAlpha * 0.16;
-    if (tint) {
-      ctx.drawImage(tint, -size / 2 - size * 0.16, -size / 2 + size * 0.12, size, size);
-      ctx.drawImage(tint, -size / 2 + size * 0.16, -size / 2 + size * 0.12, size, size);
-    }
-    ctx.globalCompositeOperation = 'source-over';
-  }
-  ctx.globalAlpha = inheritedAlpha;
-  ctx.shadowColor = color; ctx.shadowBlur = Math.max(8, size * 0.25);
-  ctx.drawImage(img, -size / 2, -size / 2, size, size);
-  ctx.shadowBlur = 0;
-  if (tint) {
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = inheritedAlpha * (tier >= 2 ? 0.25 : 0.18);
-    ctx.drawImage(tint, -size / 2, -size / 2, size, size);
-  }
-  ctx.restore();
+  const bake = aetherRelicBake(img, color, tier, size);
+  const total = size * bake.scale; // halo padding rides the same scale
+  ctx.drawImage(bake.c, x - total / 2, y - total / 2, total, total);
   return true;
 }
 
@@ -654,7 +681,7 @@ function aetherPreviewImage(id, light) {
     : (typeof AETHERFALL_ART_PREVIEW !== 'undefined' && AETHERFALL_ART_PREVIEW);
   const src = table && table[id];
   if (!src) return null;
-  if (!aetherPreviewImages[src]) { const im = new Image(); im.src = src; aetherPreviewImages[src] = im; }
+  if (!aetherPreviewImages[src]) aetherPreviewImages[src] = loadAetherImage(src, 'preview');
   const img = aetherPreviewImages[src];
   return (img.complete && img.naturalWidth) ? img : null;
 }
@@ -663,26 +690,31 @@ function aetherPreviewImage(id, light) {
 // vessel. Both load lazily on first draw, so the first click on any tile
 // showed the scaled-up tile art for a beat and then swapped to the preview
 // (and the tiles themselves popped from procedural bakes to their PNGs).
-// Warming the whole roster while the TITLE screen is up means every image a
-// click can reach is already decoded before the player gets there.
+// AFT-011 keeps boot honest: warm only the vessels visible on the current
+// setup surface plus the selected hero. Opening BROWSE ALL intentionally
+// expands that bundle; the rest of the campaign remains procedural until its
+// realm is current. Weapons load on demand behind their vector fallback.
 let warmedSetupArt = '';
 function warmSetupArt() {
-  if (warmedSetupArt === SKIN.id) return;
-  warmedSetupArt = SKIN.id;
-  for (const k in SKIN.starterMon) {
-    const sm = SKIN.starterMon[k];
-    if (!sm || !sm.ids) continue;
-    for (const id of sm.ids) getSprite(id); // tiles + evolution forms (kicks the final-PNG overrides)
-    aetherPreviewImage(sm.ids[0], false);   // the hero portrait
-    aetherPreviewImage(sm.ids[0], true);    // its radiant casting (LIGHT oath summary card)
-  }
-  // the 21 Relicforge weapon sprites too (owner report, 2026-07-24: draft
-  // surfaces flashed the vector fallback for a beat before the PNG landed —
-  // production art must be there from the first frame)
-  if (SKIN.weaponArt) {
-    for (const k2 in (SKIN.weaponArt.shapes || {})) aetherRelicImage(k2);
-    for (const k2 in (SKIN.weaponArt.aux || {})) aetherAuxImage(k2);
-  }
+  if (SKIN.id !== 'aetherfall') return;
+  const keys = (!pilotBrowseAll && pilotFreshSession())
+    ? PILOT_ARCHETYPES.map(a => a.key) : Object.keys(SKIN.starterMon || {});
+  if (SETTINGS.starter && SETTINGS.starter !== 'none' && !keys.includes(SETTINGS.starter)) keys.push(SETTINGS.starter);
+  const warmKey = SKIN.id + '|' + keys.join(',') + '|' + SETTINGS.starter + '|' + (SETTINGS.affinity || '');
+  if (warmedSetupArt === warmKey) return;
+  warmedSetupArt = warmKey;
+  withAetherArtBundle('VESSEL FORGE', true, () => {
+    for (const k of keys) {
+      const sm = SKIN.starterMon[k];
+      if (sm && sm.ids) getSprite(sm.ids[0]);
+    }
+    const chosen = SKIN.starterMon[SETTINGS.starter];
+    if (chosen && chosen.ids) {
+      getSprite(chosen.ids[0]);
+      aetherPreviewImage(chosen.ids[0], false);
+      if (SETTINGS.affinity === 'light') aetherPreviewImage(chosen.ids[0], true);
+    }
+  });
 }
 function affinityVesselImage(id, big, forceBase) {
   if (id > 0) {
@@ -1066,9 +1098,17 @@ function drawBossMon(br, x, y) {
     ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fill();
     if (frac > 0) {
       roundRect(x - bw2 / 2, y - hh - 16, bw2 * frac, 8, 4);
-      const hg = ctx.createLinearGradient(x - bw2 / 2, 0, x + bw2 / 2, 0);
-      hg.addColorStop(0, '#ff5252'); hg.addColorStop(1, '#ffd54f');
+      // cached in local space, re-mapped through the CTM (AFT-018 rule)
+      let hg = fxCache.hpGradRedGold;
+      if (!hg) {
+        hg = ctx.createLinearGradient(0, 0, 1, 0);
+        hg.addColorStop(0, '#ff5252'); hg.addColorStop(1, '#ffd54f');
+        fxCache.hpGradRedGold = hg;
+      }
+      ctx.save();
+      ctx.translate(x - bw2 / 2, 0); ctx.scale(bw2, 1);
       ctx.fillStyle = hg; ctx.fill();
+      ctx.restore();
     }
     // phase notches and pips mirror this boss's authored phase count.
     ctx.fillStyle = 'rgba(6,9,24,0.9)';
@@ -1392,9 +1432,17 @@ function drawBricks() {
         ctx.fillStyle = 'rgba(5,8,20,0.72)'; ctx.fill();
         if (frac > 0) {
           roundRect(x - sbw / 2, sby, sbw * frac, 6, 3);
-          const sg = ctx.createLinearGradient(x - sbw / 2, 0, x + sbw / 2, 0);
-          sg.addColorStop(0, col); sg.addColorStop(1, '#f5f7ff');
+          // cached in local space, re-mapped through the CTM (AFT-018 rule)
+          let sg = fxCache['sbGrad_' + col];
+          if (!sg) {
+            sg = ctx.createLinearGradient(0, 0, 1, 0);
+            sg.addColorStop(0, col); sg.addColorStop(1, '#f5f7ff');
+            fxCache['sbGrad_' + col] = sg;
+          }
+          ctx.save();
+          ctx.translate(x - sbw / 2, 0); ctx.scale(sbw, 1);
           ctx.fillStyle = sg; ctx.fill();
+          ctx.restore();
         }
       } else if (br.maxHp >= 3 && br.hp < br.maxHp && br.hp > 0) {
         const frac = Math.max(0, br.hp / br.maxHp);
@@ -2961,6 +3009,17 @@ function drawRiteFx() {
       if (b.dead || !b.totem) continue;
       const bx2 = b.bx + G.fx, by2 = b.by + G.fy;
       const r = Math.max(b.w, b.h) * 0.66;
+      ctx.save();
+      if (!b.riteArmed) {
+        ctx.globalAlpha = 0.32;
+        ctx.setLineDash([4, 6]); ctx.lineWidth = 1.5; ctx.strokeStyle = '#90a4ae';
+        ctx.beginPath(); ctx.arc(bx2, by2, r + 6, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+        fitLabel('WAITING', bx2, by2 + r + 13,
+          { size: 8, min: 7, weight: 800, color: '#b0bec5', maxW: 58 });
+        ctx.restore();
+        continue;
+      }
       if (b.riteKind === 'opening') {
         const gapA = (G.time * 0.9) % (Math.PI * 2);
         ctx.lineWidth = 3;
@@ -2980,6 +3039,7 @@ function drawRiteFx() {
         ctx.strokeStyle = 'rgba(124,179,66,0.7)';
         ctx.strokeRect(bx2 - r, by2 + r + 6, r * 2, 5);
       }
+      ctx.restore();
     }
   } else {
     // the moon: FILLED crescent = bright rules; HOLLOW = dark rules
@@ -3489,13 +3549,27 @@ function drawTelegraphs() {
       drawGlyph(ctx, 'alert', cs.x, H * 0.55, 13, '#ff8a80');
     } else {
       const a = Math.min(1, cs.strike / 0.2);
-      ctx.globalAlpha = 0.8 * a;
-      const g = ctx.createLinearGradient(cs.x - cs.w / 2, 0, cs.x + cs.w / 2, 0);
-      g.addColorStop(0, 'rgba(255,255,255,0)');
-      g.addColorStop(0.5, col);
-      g.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.fillStyle = g;
-      ctx.fillRect(cs.x - cs.w / 2, 0, cs.w, FLOOR());
+      // the soft lane wash is a flourish over the flat white CORE (the real
+      // tell) — its gradient is cached per colour in local space and re-mapped
+      // through the CTM per strike (a desperation channel fires 5-10 strikes
+      // at once; allocating per strike per frame was a GC hitch at the worst
+      // moment), and the deepest rung drops the wash entirely
+      if (effectsLevel() < 3) {
+        let g = fxCache['csGrad_' + col];
+        if (!g) {
+          g = ctx.createLinearGradient(-0.5, 0, 0.5, 0);
+          g.addColorStop(0, 'rgba(255,255,255,0)');
+          g.addColorStop(0.5, col);
+          g.addColorStop(1, 'rgba(255,255,255,0)');
+          fxCache['csGrad_' + col] = g;
+        }
+        ctx.globalAlpha = 0.8 * a;
+        ctx.save();
+        ctx.translate(cs.x, 0); ctx.scale(cs.w, 1);
+        ctx.fillStyle = g;
+        ctx.fillRect(-0.5, 0, 1, FLOOR());
+        ctx.restore();
+      }
       ctx.globalAlpha = a;
       ctx.fillStyle = '#fff';
       ctx.fillRect(cs.x - cs.w * 0.12, 0, cs.w * 0.24, FLOOR());
@@ -4176,74 +4250,114 @@ function drawProjectiles() {
 // power's rune engraved in its own colour and a restrained core glow. Colour
 // still carries the gameplay read — only the material language changed.
 // Flat fills + strokes only (no per-drop gradient allocation).
-function drawRelicPlate(col, glyphKey, pulse) {
-  const R = 17;
-  ctx.shadowColor = col; ctx.shadowBlur = 10 + 6 * pulse;
+// The plate is BAKED once per (colour, glyph) — a boss fight drops several of
+// these mid-combat, and the old path set shadowBlur twice per drop per frame.
+// The pulse survives as a cheap additive breath over the baked art.
+function relicPlateSprite(col, glyphKey) {
+  const ck = 'relicPlate_' + col + '_' + glyphKey;
+  if (fxCache[ck]) return fxCache[ck];
+  const R = 17, S = 88;
+  const cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const c = cv.getContext('2d');
+  c.translate(S / 2, S / 2);
+  c.shadowColor = col; c.shadowBlur = 13; // the mid-pulse halo, baked
   // brass octagon frame
-  ctx.beginPath();
+  c.beginPath();
   for (let i = 0; i < 8; i++) {
     const a = i * Math.PI / 4 + Math.PI / 8;
-    ctx[i ? 'lineTo' : 'moveTo'](Math.cos(a) * R, Math.sin(a) * R);
+    c[i ? 'lineTo' : 'moveTo'](Math.cos(a) * R, Math.sin(a) * R);
   }
-  ctx.closePath();
-  ctx.fillStyle = '#3a2f1c'; ctx.fill();          // recessed brass shadow
-  ctx.lineWidth = 2.4; ctx.strokeStyle = '#c9a44c'; ctx.stroke();  // antique brass
-  ctx.shadowBlur = 0;
+  c.closePath();
+  c.fillStyle = '#3a2f1c'; c.fill();          // recessed brass shadow
+  c.lineWidth = 2.4; c.strokeStyle = '#c9a44c'; c.stroke();  // antique brass
+  c.shadowBlur = 0;
   // weathered steel core
-  ctx.beginPath();
+  c.beginPath();
   for (let i = 0; i < 8; i++) {
     const a = i * Math.PI / 4 + Math.PI / 8;
-    ctx[i ? 'lineTo' : 'moveTo'](Math.cos(a) * R * 0.74, Math.sin(a) * R * 0.74);
+    c[i ? 'lineTo' : 'moveTo'](Math.cos(a) * R * 0.74, Math.sin(a) * R * 0.74);
   }
-  ctx.closePath();
-  ctx.fillStyle = '#141a26'; ctx.fill();
-  ctx.lineWidth = 1; ctx.strokeStyle = '#6b7687'; ctx.stroke();
+  c.closePath();
+  c.fillStyle = '#141a26'; c.fill();
+  c.lineWidth = 1; c.strokeStyle = '#6b7687'; c.stroke();
   // top-left key light on the brass (the style-lock signature)
-  ctx.globalAlpha = 0.5;
-  ctx.lineWidth = 1.6; ctx.strokeStyle = '#f0dfa8';
-  ctx.beginPath(); ctx.arc(0, 0, R * 0.9, Math.PI * 1.06, Math.PI * 1.5); ctx.stroke();
-  ctx.globalAlpha = 1;
+  c.globalAlpha = 0.5;
+  c.lineWidth = 1.6; c.strokeStyle = '#f0dfa8';
+  c.beginPath(); c.arc(0, 0, R * 0.9, Math.PI * 1.06, Math.PI * 1.5); c.stroke();
+  c.globalAlpha = 1;
   // the rune core: the power's colour, glowing from within the plate
-  ctx.shadowColor = col; ctx.shadowBlur = 8 + 5 * pulse;
-  drawGlyph(ctx, glyphKey, 0, 0, 9, col);
-  ctx.shadowBlur = 0;
+  c.shadowColor = col; c.shadowBlur = 10;
+  drawGlyph(c, glyphKey, 0, 0, 9, col);
+  c.shadowBlur = 0;
   // four brass rivets
-  ctx.fillStyle = '#c9a44c';
+  c.fillStyle = '#c9a44c';
   for (let i = 0; i < 4; i++) {
     const a = i * Math.PI / 2 + Math.PI / 4;
-    ctx.beginPath(); ctx.arc(Math.cos(a) * R * 0.86, Math.sin(a) * R * 0.86, 1.5, 0, Math.PI * 2); ctx.fill();
+    c.beginPath(); c.arc(Math.cos(a) * R * 0.86, Math.sin(a) * R * 0.86, 1.5, 0, Math.PI * 2); c.fill();
   }
+  fxCache[ck] = cv;
+  return cv;
+}
+function drawRelicPlate(col, glyphKey, pulse) {
+  const cv = relicPlateSprite(col, glyphKey);
+  ctx.drawImage(cv, -cv.width / 2, -cv.height / 2);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.08 + 0.2 * pulse;
+  ctx.drawImage(glowDisc(col), -24, -24, 48, 48);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
 }
 // the catch item as a BINDING SIGIL relic: brass hex ring, dark core, a
 // crystal eye that turns gold when the quarry is radiant
-function drawBindingSigil(shiny, pulse) {
+// Baked once per shiny-state (same rationale as the relic plate); the eye's
+// pulse rides a live additive breath + a tiny unshadowed fill.
+function bindingSigilSprite(shiny) {
+  const ck = 'bindSigil_' + (shiny ? 's' : 'n');
+  if (fxCache[ck]) return fxCache[ck];
   const core = shiny ? '#ffd700' : '#8fd6ff';
-  const R = 15;
-  ctx.shadowColor = core; ctx.shadowBlur = 12 + 8 * pulse;
-  ctx.beginPath();
+  const R = 15, S = 84;
+  const cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const c = cv.getContext('2d');
+  c.translate(S / 2, S / 2);
+  c.shadowColor = core; c.shadowBlur = 16; // mid-pulse halo, baked
+  c.beginPath();
   for (let i = 0; i < 6; i++) {
     const a = i * Math.PI / 3 - Math.PI / 2;
-    ctx[i ? 'lineTo' : 'moveTo'](Math.cos(a) * R, Math.sin(a) * R);
+    c[i ? 'lineTo' : 'moveTo'](Math.cos(a) * R, Math.sin(a) * R);
   }
-  ctx.closePath();
-  ctx.fillStyle = '#181322'; ctx.fill();
-  ctx.lineWidth = 2.4; ctx.strokeStyle = '#c9a44c'; ctx.stroke();
-  ctx.shadowBlur = 0;
+  c.closePath();
+  c.fillStyle = '#181322'; c.fill();
+  c.lineWidth = 2.4; c.strokeStyle = '#c9a44c'; c.stroke();
+  c.shadowBlur = 0;
   // binding runes on three alternating faces
-  ctx.lineWidth = 1.3; ctx.strokeStyle = '#e6cf8e'; ctx.globalAlpha = 0.85;
+  c.lineWidth = 1.3; c.strokeStyle = '#e6cf8e'; c.globalAlpha = 0.85;
   for (let i = 0; i < 3; i++) {
     const a = i * (Math.PI * 2 / 3) - Math.PI / 2;
-    ctx.beginPath();
-    ctx.moveTo(Math.cos(a) * R * 0.62, Math.sin(a) * R * 0.62);
-    ctx.lineTo(Math.cos(a) * R * 0.9, Math.sin(a) * R * 0.9);
-    ctx.stroke();
+    c.beginPath();
+    c.moveTo(Math.cos(a) * R * 0.62, Math.sin(a) * R * 0.62);
+    c.lineTo(Math.cos(a) * R * 0.9, Math.sin(a) * R * 0.9);
+    c.stroke();
   }
+  c.globalAlpha = 1;
+  // the crystal eye (its glow bakes; the radius pulse draws live)
+  c.shadowColor = core; c.shadowBlur = 10;
+  c.beginPath(); c.arc(0, 0, 5.2, 0, Math.PI * 2);
+  c.fillStyle = core; c.fill();
+  c.shadowBlur = 0;
+  fxCache[ck] = cv;
+  return cv;
+}
+function drawBindingSigil(shiny, pulse) {
+  const core = shiny ? '#ffd700' : '#8fd6ff';
+  const cv = bindingSigilSprite(shiny);
+  ctx.drawImage(cv, -cv.width / 2, -cv.height / 2);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.1 + 0.22 * pulse;
+  ctx.drawImage(glowDisc(core), -20, -20, 40, 40);
   ctx.globalAlpha = 1;
-  // the crystal eye
-  ctx.shadowColor = core; ctx.shadowBlur = 10;
-  ctx.beginPath(); ctx.arc(0, 0, 5.2 + pulse * 0.8, 0, Math.PI * 2);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.beginPath(); ctx.arc(0, 0, 4.6 + pulse * 1.2, 0, Math.PI * 2);
   ctx.fillStyle = core; ctx.fill();
-  ctx.shadowBlur = 0;
   ctx.beginPath(); ctx.arc(-1.4, -1.6, 1.7, 0, Math.PI * 2);
   ctx.fillStyle = '#ffffff'; ctx.globalAlpha = 0.8; ctx.fill(); ctx.globalAlpha = 1;
 }
@@ -6163,11 +6277,64 @@ function bossRevealImage(id) {
   if (revealImgCache[id]) return revealImgCache[id];
   let img = null;
   if (SKIN.id === 'aetherfall' && typeof AETHERFALL_ART_REVEAL !== 'undefined' && AETHERFALL_ART_REVEAL[id]) {
-    img = new Image();
-    img.src = AETHERFALL_ART_REVEAL[id];
+    img = loadAetherImage(AETHERFALL_ART_REVEAL[id], 'reveal');
   } else img = getSprite(id);
   revealImgCache[id] = img;
   return img;
+}
+
+// AFT-011: bound the decoded campaign library to current + next realm, plus
+// the player's three-form vessel line. The production images/canvases are
+// ordinary JS references, so deleting old cache entries makes them eligible
+// for collection without touching anything still on the live stage.
+function trimAetherfallArtCaches(currentRealm) {
+  if (SKIN.id !== 'aetherfall') return;
+  const nextRealm = (currentRealm + 1) % SKIN.gens.length;
+  const keepIds = new Set([...realmArtIds(currentRealm), ...realmArtIds(nextRealm)]);
+  const chosen = SKIN.starterMon && SKIN.starterMon[SETTINGS.starter];
+  if (chosen && chosen.ids) chosen.ids.forEach(id => keepIds.add(id));
+  if (SKINS.aetherfall.retainSpriteIds) SKINS.aetherfall.retainSpriteIds(keepIds);
+
+  const keepReveal = new Set([...realmArtIds(currentRealm), ...realmArtIds(nextRealm)]);
+  for (const id of Object.keys(revealImgCache)) if (!keepReveal.has(+id)) delete revealImgCache[id];
+
+  const keepPreview = new Set();
+  if (chosen && chosen.ids) {
+    const tables = [typeof AETHERFALL_ART_PREVIEW !== 'undefined' && AETHERFALL_ART_PREVIEW,
+      typeof AETHERFALL_ART_PREVIEW_RADIANT !== 'undefined' && AETHERFALL_ART_PREVIEW_RADIANT];
+    for (const table of tables) if (table) for (const id of chosen.ids) if (table[id]) keepPreview.add(table[id]);
+  }
+  for (const src of Object.keys(aetherPreviewImages)) if (!keepPreview.has(src)) delete aetherPreviewImages[src];
+  for (const key of Object.keys(fxCache)) {
+    if (!key.startsWith('vessel_')) continue;
+    const id = +(key.split('_')[1] || 0);
+    if (!keepIds.has(id)) delete fxCache[key];
+  }
+}
+
+function aetherArtMemoryStats() {
+  const bytesFor = values => values.reduce((n, img) => {
+    const w = (img && (img.naturalWidth || img.width)) || 0;
+    const h = (img && (img.naturalHeight || img.height)) || 0;
+    return n + w * h * 4;
+  }, 0);
+  const sprite = SKINS.aetherfall.spriteCacheStats ? SKINS.aetherfall.spriteCacheStats()
+    : { count: 0, decodedBytes: 0 };
+  const buckets = {
+    sprites: sprite.decodedBytes,
+    previews: bytesFor(Object.values(aetherPreviewImages)),
+    reveals: bytesFor(Object.values(revealImgCache)),
+    weapons: bytesFor(Object.values(aetherWeaponImages)),
+  };
+  const decodedBytes = Object.values(buckets).reduce((a, b) => a + b, 0);
+  return {
+    decodedMB: +(decodedBytes / 1048576).toFixed(2), spriteCanvases: sprite.count,
+    previews: Object.keys(aetherPreviewImages).length, reveals: Object.keys(revealImgCache).length,
+    weapons: Object.keys(aetherWeaponImages).length,
+    bucketsMB: Object.fromEntries(Object.entries(buckets).map(([k, v]) => [k, +(v / 1048576).toFixed(2)])),
+    jsHeapMB: performance.memory && performance.memory.usedJSHeapSize
+      ? +(performance.memory.usedJSHeapSize / 1048576).toFixed(2) : null,
+  };
 }
 function drawRevealPortrait(id, cx, cy, side, alpha, latch) {
   let img = bossRevealImage(id);
@@ -8020,13 +8187,15 @@ function drawAdvanced() {
   // accessibility toggles
   for (let i = 0; i < A.toggles.length; i++) {
     const t = A.toggles[i], r = A.toggle(i);
-    if (t.cycle) { // AFT-018: a 3-way cycle row (EFFECTS QUALITY)
+    if (t.cycle) { // AFT-018: the cycle row (EFFECTS QUALITY)
       ctx.textAlign = 'left';
       ctx.font = '700 12px Orbitron, sans-serif';
       ctx.fillStyle = '#e3f2fd';
       ctx.fillText(t.label, r.x + 44, r.y + r.h / 2);
       ctx.textAlign = 'right';
-      ctx.fillStyle = SETTINGS[t.key] === 'full' ? '#ffd54f' : SETTINGS[t.key] === 'reduced' ? '#80cbc4' : '#66bb6a';
+      ctx.fillStyle = SETTINGS[t.key] === 'full' ? '#ffd54f'
+        : SETTINGS[t.key] === 'reduced' ? '#80cbc4'
+        : SETTINGS[t.key] === 'minimal' ? '#b0bec5' : '#66bb6a';
       ctx.fillText(String(SETTINGS[t.key]).toUpperCase() + ' ▸', r.x + r.w - 6, r.y + r.h / 2);
       continue;
     }
@@ -9838,6 +10007,39 @@ function drawForgeMenu(accent) {
   }
   ctx.restore();
 }
+// AFT-011: an honest, non-blocking loading plate. Production art improves in
+// place; the procedural/vector game underneath is complete and playable, so
+// the copy says that plainly instead of trapping a phone behind a fake 100%.
+function drawAetherArtLoading() {
+  if (SKIN.id !== 'aetherfall') return;
+  const s = AETHER_ART_STREAM.summary();
+  if (!s || (!s.pending && !s.failed)) return;
+  const compact = G.state !== 'menu';
+  const w = Math.min(W - 24 - SAFE_L - SAFE_R, compact ? 292 : 356);
+  const h = compact ? 44 : 62;
+  const x = SAFE_L + (W - SAFE_L - SAFE_R - w) / 2;
+  const y = H - SAFE_B - h - (IS_TOUCH ? 12 : 18);
+  ctx.save();
+  roundRect(x, y, w, h, 10);
+  ctx.fillStyle = 'rgba(5,8,22,0.94)'; ctx.fill();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = s.failed ? '#ff8a80' : '#80d8ff'; ctx.stroke();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.font = '800 9px Orbitron, sans-serif'; ctx.fillStyle = '#f4f8ff';
+  const label = s.pending ? s.label + ' · ' + s.settled + '/' + s.requested
+    : 'PRODUCTION ART FALLBACK · ' + s.failed + ' UNAVAILABLE';
+  ctx.fillText(label, x + 12, y + 15, w - 24);
+  if (s.pending) {
+    const p = s.requested ? s.settled / s.requested : 1;
+    roundRect(x + 12, y + 27, w - 24, 5, 2.5); ctx.fillStyle = '#17243b'; ctx.fill();
+    roundRect(x + 12, y + 27, (w - 24) * p, 5, 2.5); ctx.fillStyle = '#5affc3'; ctx.fill();
+  }
+  if (!compact) {
+    ctx.font = bodyFont(9, 700); ctx.fillStyle = '#b9c8d8';
+    ctx.fillText('PLAYABLE NOW · PROCEDURAL ART IS ACTIVE DURING THE STREAM', x + 12, y + 47, w - 24);
+  }
+  ctx.restore();
+}
+
 function drawOverlays() {
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   if (G.state === 'menu') { drawMenu(); }
@@ -10492,6 +10694,7 @@ function render() {
   if (G.state !== 'menu' && G.state !== 'dex' && G.state !== 'upgrade' && G.state !== 'results') drawHUD();
   drawOverlays();
   if (G.state === 'menu' || G.state === 'dex') drawAnnounce(); // konami toast etc.
+  drawAetherArtLoading();
   drawBossReveal(); // AFT-002: modal, above HUD and overlays
   drawCursor();
 }

@@ -1314,6 +1314,42 @@ function assignClassicBrickBehaviors(regionsIn, stage) {
   setAnnounce(info.icon, info.color, info.name, info.desc, 2.8,
     primary === 'shield' ? 'FOLLOW THE GREEN LINKS TO THE GENERATOR' : 'EVERY MARKED TARGET IS STILL BALL-BREAKABLE');
 }
+
+// AFT-011 realm streaming. The current realm kicks its production art now;
+// the successor waits until the browser has had a quiet beat. Procedural art
+// is already live synchronously, so neither step is a gameplay gate.
+let realmArtPrefetchTimer = null;
+let realmArtPrefetchRealm = -1;
+function warmAetherfallRealm(rIdx2, foreground) {
+  const gen = SKIN.gens && SKIN.gens[rIdx2];
+  if (!gen) return;
+  withAetherArtBundle((foreground ? 'CURRENT · ' : 'NEXT · ') + gen.name, foreground, () => {
+    preloadGen(gen);
+    warmRevealArt(rIdx2);
+  });
+}
+function flushAetherfallRealmPrefetch() {
+  if (realmArtPrefetchRealm < 0) return;
+  const r = realmArtPrefetchRealm;
+  realmArtPrefetchRealm = -1;
+  if (realmArtPrefetchTimer != null) clearTimeout(realmArtPrefetchTimer);
+  realmArtPrefetchTimer = null;
+  warmAetherfallRealm(r, false);
+}
+function streamAetherfallRealm(rIdx2) {
+  if (SKIN.id !== 'aetherfall') {
+    preloadGen(SKIN.gens[rIdx2]);
+    preloadGen(SKIN.gens[(rIdx2 + 1) % SKIN.gens.length]);
+    warmRevealArt(rIdx2); warmRevealArt((rIdx2 + 1) % SKIN.gens.length);
+    return;
+  }
+  if (realmArtPrefetchTimer != null) clearTimeout(realmArtPrefetchTimer);
+  realmArtPrefetchTimer = null;
+  trimAetherfallArtCaches(rIdx2);
+  warmAetherfallRealm(rIdx2, true);
+  realmArtPrefetchRealm = (rIdx2 + 1) % SKIN.gens.length;
+  realmArtPrefetchTimer = setTimeout(flushAetherfallRealmPrefetch, 1200);
+}
 function buildLevel(lvl) {
   G.bricks = []; G.powerups = []; G.lasers = []; G.missiles = []; G.enemyShots = [];
   G.relics = []; G.relicCount = 0; // a wave never inherits mid-flight relics
@@ -1359,12 +1395,7 @@ function buildLevel(lvl) {
   const theme = pickWaveTheme(rIdx);
   G.waveThemeObj = theme; // reinforcements arrive as the SECOND BEAT of this ecology
   G.waveTheme = theme.name;
-  preloadGen(gen);
-  preloadGen(genFor(lvl + STAGES));
-  // reveal portraits warm with STAGES of lead time (owner report,
-  // 2026-07-24: the trio's portraits traded color a beat into the reveal)
-  warmRevealArt(rIdx);
-  warmRevealArt((rIdx + 1) % SKIN.gens.length);
+  streamAetherfallRealm(rIdx);
   buildBackground(rIdx);
   const p = preset();
   const cycle = Math.floor((lvl - 1) / (SKIN.gens.length * STAGES)); // full-journey loops
@@ -1608,12 +1639,15 @@ function buildLevel(lvl) {
           // 107-hp totems at ×0.25 trickle: a measured ten-minute stall)
           v.hp = v.maxHp = 22;
           v.riteKind = ['opening', 'pulse', 'root'][ri2 % 3];
+          v.riteOrder = ri2;
+          v.riteArmed = false;
           v.riteHits = 0;
           v.riteRoot = 0;
           ri2++;
         }
         G.finale.rite = {
           marks: 0, resolved: 0, moon: 'bright', moonT: 0, moonEvery: 7,
+          activeRite: 0, armAt: 6, interlude: 17,
           steal: null, stolen: 0, tags: 0, reclaimed: false, gateCD: 3.5, stealCD: 14,
         };
         G.finale.meter = { value: 0, max: 3, label: fp.beats[0].label || 'RITES' };
@@ -2107,6 +2141,11 @@ function buildLevel(lvl) {
   // simultaneous actors; the ≤26-flyer readability cap is untouched.
   G.reinforce = hasBoss ? 0 : (junkie ? (regionsIn >= 7 ? 4 : regionsIn >= 6 ? 3 : regionsIn >= 3 ? 2 : 1)
     : classic ? 0 : regionsIn >= 2 ? (regionsIn >= 5 ? 2 : 1) : 0);
+  // AFT-011 targeted late-stage cleanup: only the final Challenge (L26)
+  // receives one extra sequential flight. Five seeds showed a healthy 40.7s
+  // median but two 26s collapses; this raises duration without more actors
+  // on screen or a global health change.
+  if (!hasBoss && junkie && regionsIn === 8 && stage === 1) G.reinforce++;
   G.marchDir = gameRand() < 0.5 ? -1 : 1;
   // move (bosses keep their guard-ring choreography)
   G.blocksStatic = !hasBoss;
@@ -2575,8 +2614,8 @@ function serve() {
 // ============================================================
 // AFT-018: decorative spawns scale with the effects level — never hostile
 // fire, never telegraphs, never hit feedback (floaters are information).
-function fxEmitScale() { return effectsLevel() >= 2 ? 0.45 : 1; }
-function fxLifeScale() { return effectsLevel() >= 2 ? 0.7 : 1; }
+function fxEmitScale() { const l = effectsLevel(); return l >= 3 ? 0.3 : l >= 2 ? 0.45 : 1; }
+function fxLifeScale() { const l = effectsLevel(); return l >= 3 ? 0.55 : l >= 2 ? 0.7 : 1; }
 function burst(x, y, color, n = 18, speed = 260, life = 0.7) {
   n = Math.max(1, Math.round(n * fxEmitScale())); life *= fxLifeScale();
   for (let i = 0; i < n; i++) {
@@ -2616,7 +2655,8 @@ function addFloater(x, y, text, color, size = 16) {
 }
 // expanding shockwave ring — the modern "kill pop". Additive, cheap, capped.
 function ringFx(x, y, color, r0 = 6, r1 = 40, lw = 3, life = 0.38) {
-  if (effectsLevel() >= 2 && G.rings.length > 10) return; // lean mode: fewer blurred rings
+  const lvl = effectsLevel();
+  if (lvl >= 2 && G.rings.length > (lvl >= 3 ? 6 : 10)) return; // lean mode: fewer blurred rings
   if (G.rings.length > 24) return;
   G.rings.push({ x, y, color, r0, r1, lw, life, maxLife: life });
 }
