@@ -512,6 +512,9 @@
     riftDesc: "ONE OF THREE PIECES THAT REWRITES THE MARCHES' FINAL ROUND",
     partnerWord: 'VESSEL',
     regionWord: 'REALM',
+    rushName: 'SOVEREIGN RUSH', // the nine-finale timed mode (trial picker)
+    rushFoes: 'SOVEREIGNS',
+    dossierName: 'SOVEREIGNS', // AFT-013: the codex's boss-dossier tab
   };
 
   // ── THE SURGE LEXICON (AFT-003) ──────────────────────────────────────────
@@ -534,6 +537,13 @@
     [/\bBUTTON — EVOLVE\b/g, 'BUTTON — UNLEASH'], // vessels ASCEND, they don't evolve
     [/\bMEGA\b/g, 'SURGE'],             // \b keeps the OMEGA SERAPH intact
     [/\bPARTNER\b/g, 'VESSEL'],         // the last partnerWord leak in shared copy
+    // this world's realm bosses are SOVEREIGNS — the reveal, the dossiers and
+    // the stage label all said LEGENDARY while the codex tab said SOVEREIGNS
+    [/\bA HELD ITEM\b/g, 'A RELIC'],    // drafts hand out RELICS here, not held items
+    [/\bHELD ITEM\b/g, 'RELIC'],
+    [/\bLEGENDARIES\b/g, 'SOVEREIGNS'],
+    [/\bLEGENDARY\b/g, 'SOVEREIGN'],
+    [/\bMYTHICAL\b/g, 'MYTHIC'],
   ];
 
   // the rift-secret encounter (engine flow; species + copy are skin data)
@@ -844,6 +854,7 @@
       meterLabel: 'BREAK METER', seraphShieldWord: 'THE CROWN SHIELDS IT',
       segmentWord: 'CROWN SEGMENT', boundName: 'VYRAKKA IS BOUND',
       freeWord: 'VYRAKKA UNBOUND — SHE TEARS THE CROWN!',
+      freeTip: 'OPTIONAL: BREAK EVERY VINE TO FREE VYRAKKA — SHE TEARS A CROWN SEGMENT OPEN', // AFT-013 dossier cue
       jobs: ['ENERGIZE', 'REINFORCE', 'FREEZE'],
     },
   };
@@ -908,6 +919,7 @@
     mythicAbilities, mythicEntranceStyles, mythicBattleStyles, legendaryEntranceStyles,
     motionById, encounterObjectives, stageObjectiveSets, bonusFlock,
     strings, secret, weaponArt, lexicon,
+    stageNames: ['ARRIVAL', 'CHALLENGE', 'SOVEREIGN'],
   });
   // derived sets refresh from the REAL gens (assembly ran on the stub)
   AF.bossOnlyIds = new Set(AF.gens.flatMap(g => [

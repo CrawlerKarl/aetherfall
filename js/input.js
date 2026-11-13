@@ -19,21 +19,28 @@ function touchButtons() {
   // AFT-021 P2: ONE top corner target — pause. The sound toggle moved to the
   // pause screen (it was a second large circle floating over the formation
   // zone; live combat keeps only what live combat needs).
+  // AFT-030 (HUD rebuild): the two thumb pads share ONE centre line (the
+  // dock grid), and pause lives IN the top bar's right end (render.js
+  // hudBarLayout reads this rect; HP sits left of it).
+  const armed = blasterArmed();
+  const pr = Math.min(24, 22 * scale);
   const b = {
-    mega:  { x: edge(138), y: base - 40, r: 30 * scale }, // beside FIRE — paddle rides above both
+    // beside FIRE — or, in CLASSIC (no FIRE pad), in FIRE's own corner slot
+    // (the gap scales with the pads, so their captions never run together)
+    mega:  { x: edge(armed ? 58 + 72 * scale + 16 : 58), y: base - 42, r: 30 * scale },
     // AFT-022 F3: pause NEVER mirrors. Only the lower thumb pads follow
     // handedness — the upper-LEFT column belongs to score/COMBO/RIFT KEY and
     // the objective band, and a mirrored pause circle sat right on top of
     // them. Pause is a rare deliberate reach, not a thumb control; the
-    // upper-right slot under the lives cluster is reserved for it in every
-    // layout, so left- and right-handed play share one top row.
-    pause: { x: W - 28 - SAFE_R, y: 86 + SAFE_T, r: 22 * scale }, // ≥44 px visible targets
+    // upper-right slot of the top bar is reserved for it in every layout,
+    // so left- and right-handed play share one top row.
+    pause: { x: W - SAFE_R - 12 - pr, y: 24 + SAFE_T, r: pr }, // ≥44 px visible target at scale 1
   };
   // FIRE only when the blaster is armed — CLASSIC has none until you earn it,
   // and the ball is launched by tapping the playfield, not this pad. In the
   // shooter modes this ONE pad also charges when held, so there is no separate
   // CHARGE pad and the other thumb is free to fly/steer.
-  if (blasterArmed()) b.fire = { x: edge(58), y: base - 42, r: 42 * scale };
+  if (armed) b.fire = { x: edge(58), y: base - 42, r: 42 * scale };
   return b;
 }
 function inCircle(x, y, b, slop = 8) { return Math.hypot(x - b.x, y - b.y) < b.r + slop; }
@@ -77,7 +84,8 @@ let touchFirePendingId = null, touchFirePendingT = 0;
 // AFT-021 P4: 180ms (was 220) — the hold now CREDITS its elapsed time into
 // the charge at promotion, so the threshold only decides tap-vs-hold intent,
 // never delays the arc. 160–200ms is the plan's target band; press-down
-// feedback (pulse + haptic) fires immediately on the pad.
+// visual feedback fires immediately. FIRE itself is deliberately silent in
+// the essential-only haptic model.
 const TOUCH_CHARGE_HOLD_MS = 180;
 // AFT-021: the INPUT CLOCK — the one wall-time source for tap-vs-hold intent.
 // Mockable (inputClockOverride) so the suite can drive deterministic hold
@@ -92,7 +100,9 @@ function claimUiTouch(id, x = null, y = null, label = '') {
   uiTouchIds.add(id);
   if (x != null && y != null) {
     G.uiTouchPulse = { x, y, label, t: 0.38, max: 0.38 };
-    haptic('tap');
+    // FIRE is a gameplay trigger, not a UI decision: manual tapping must
+    // never turn into per-shot vibration. The visual press pulse remains.
+    if (label !== 'FIRE') haptic('ui');
   }
   if (paddleTouchId !== null || !G.paddle) return;
   mouseX = G.paddle.x;
@@ -252,6 +262,84 @@ function stepDexDetail(dir) {
   dexDetail = { id, radiant: dexDetail.radiant && DEXS.has(id) };
   SFX.wall();
 }
+// ---- AFT-013: the codex TABS + BOSS DOSSIERS. Render and input share the
+// geometry below (dexHeadLayout / dossierListLayout / dossierPageLayout);
+// render writes the per-frame tile + page rects, input reads them.
+let dexTab = 'grid';         // 'grid' (the collection) | 'boss' (dossiers)
+let dossierDetail = null;    // { key } or null
+let dossierTileRects = [];   // written by drawDossierList each frame
+let dossierPageRects = null; // written by drawDossierPage each frame
+function dexHeadLayout() {
+  const compact = H < 520;
+  const tabH = compact ? 28 : 32, tabY = compact ? 96 : 132;
+  const gap = 8, tw = Math.min(200, (W - 40 - gap) / 2), x0 = W / 2 - tw - gap / 2;
+  return {
+    compact, titleY: compact ? 30 : 44, tallyY: compact ? 58 : 82,
+    researchY: compact ? 75 : 104, barY: compact ? 85 : 118,
+    tabs: [{ x: x0, y: tabY, w: tw, h: tabH }, { x: x0 + tw + gap, y: tabY, w: tw, h: tabH }],
+    top: tabY + tabH + 10,
+  };
+}
+// one realm row per region: header (realm · finale title · tally), then the
+// cast left→right — sentinels, the LEGENDARY (larger), the mythic, secret
+function dossierListLayout() {
+  const HL = dexHeadLayout();
+  const gw = Math.min(W - 24, 980), x0 = W / 2 - gw / 2;
+  const gap = W < 500 ? 5 : 8;
+  const s = Math.round(Math.max(44, Math.min(W < 500 ? 84 : 104, (gw - gap * 5) / 6.3, (H - HL.top) * 0.26)));
+  const ls = Math.round(s * 1.3);
+  const labelH = 22, headH = 46;
+  const rowH = headH + ls + labelH + 16;
+  const rowY = r => HL.top + r * rowH - dexScroll;
+  const tiles = (cast, r) => {
+    const ws = cast.map(c => (c.role === 'legendary' ? ls : s));
+    const total = ws.reduce((a, b) => a + b, 0) + gap * (cast.length - 1);
+    let x = W / 2 - total / 2;
+    const y0 = rowY(r) + headH;
+    return cast.map((c, i) => {
+      const w = ws[i];
+      const t = { key: c.key, x, y: y0 + (ls - w), w, h: w + labelH };
+      x += w + gap;
+      return t;
+    });
+  };
+  const contentH = SKIN.gens.length * rowH;
+  return { HL, gw, x0, s, ls, gap, labelH, headH, rowH, rowY, tiles,
+    maxScroll: Math.max(0, contentH - (H - HL.top - 24)) };
+}
+// the dossier page: portrait-first card. Portrait stacks the info BELOW the
+// art; landscape puts it BESIDE the art. The bottom row carries ‹ / ›.
+function dossierPageLayout() {
+  const side = W > H * 1.15 && W >= 600;
+  const cw = Math.min(W - 16, side ? 1000 : 560), ch = Math.min(H - 16, side ? 660 : 880);
+  const cx = W / 2 - cw / 2, cy = H / 2 - ch / 2;
+  const pad = side ? 18 : 14, aw = 40;
+  const bottom = { y: cy + ch - aw - 10, h: aw };
+  let art, info;
+  if (side) {
+    const sp = Math.max(120, Math.min(ch - pad * 2 - aw - 10, cw * 0.42, 460));
+    art = { x: cx + pad, y: cy + pad + Math.max(0, (bottom.y - cy - pad * 2 - sp) / 2), w: sp, h: sp };
+    const ix = art.x + sp + pad;
+    info = { x: ix, y: cy + pad, w: cx + cw - pad - ix, h: bottom.y - cy - pad - 6 };
+  } else {
+    const sp = Math.max(110, Math.min(cw - pad * 2, Math.max(ch * 0.34, ch - 430), 360));
+    art = { x: W / 2 - sp / 2, y: cy + pad, w: sp, h: sp };
+    info = { x: cx + pad, y: art.y + sp + 8, w: cw - pad * 2, h: bottom.y - (art.y + sp + 8) - 6 };
+  }
+  return {
+    side, card: { x: cx, y: cy, w: cw, h: ch }, art, info,
+    prev: { x: cx + 10, y: bottom.y, w: aw, h: aw },
+    next: { x: cx + cw - aw - 10, y: bottom.y, w: aw, h: aw },
+    hint: { x: cx + aw + 20, y: bottom.y, w: cw - aw * 2 - 40, h: aw },
+  };
+}
+function stepDossier(dir) {
+  const order = bossDossierSeenOrder();
+  if (!order.length || !dossierDetail) return;
+  const i = Math.max(0, order.indexOf(dossierDetail.key));
+  dossierDetail = { key: order[(i + dir + order.length) % order.length] };
+  SFX.wall();
+}
 window.addEventListener('touchmove', e => {
   for (const t of e.changedTouches) {
     const p = treeTouches.get(t.identifier);
@@ -387,7 +475,11 @@ window.addEventListener('keydown', e => {
     else if (G.state === 'upgrade') return;
     else if (G.state === 'ceremony') { if (G.ceremony) G.ceremony.t = 99; advanceCeremony(); }
     else if (G.state === 'results') advanceResults();
-    else if (G.state === 'dex') { if (dexDetail) dexDetail = null; else { G.state = 'menu'; dexScroll = 0; } }
+    else if (G.state === 'dex') {
+      if (dossierDetail) dossierDetail = null;
+      else if (dexDetail) dexDetail = null;
+      else { G.state = 'menu'; dexScroll = 0; }
+    }
     else if (trialOpen) trialOpen = false;
     else if (advOpen) { advOpen = false; saveSettings(); }
     else if (cheatOpen) cheatOpen = false;
@@ -494,7 +586,24 @@ document.addEventListener('visibilitychange', () => {
     chargeHeld = false; chargeTouchId = null; touchFirePendingId = null;
     G.charge = 0; G.chargeFullT = 0;
   }
+  // AFT-015: a backgrounded tab must not keep the audio graph running; the
+  // next gesture resumes it through audio() (never auto-unpause the game)
+  if (document.hidden) suspendAudioForBackground();
 });
+function suspendAudioForBackground() {
+  try { if (typeof AC !== 'undefined' && AC && AC.state === 'running') AC.suspend().catch(() => {}); } catch (e) {}
+}
+// pagehide == hidden (iOS fires it when an installed app is swiped away / bfcached)
+window.addEventListener('pagehide', () => {
+  if (G.state === 'play') {
+    paused = true;
+    chargeHeld = false; chargeTouchId = null; touchFirePendingId = null;
+    G.charge = 0; G.chargeFullT = 0;
+  }
+  suspendAudioForBackground();
+});
+// bfcache restore: the viewport may have changed while frozen
+window.addEventListener('pageshow', e => { if (e.persisted) { try { resize(); } catch (err) {} } });
 
 function setSliderFromX(i, x) {
   const s = activeSliders()[i], gm = sliderGeom(i);
@@ -578,36 +687,63 @@ function handleSavePress(x, y, A) {
     return;
   }
 }
-// between-wave upgrade cards: 3 across on desktop, stacked rows on phones
+// THE DRAFT SHEET (AFT-029) — the one layout behind every hand (stage
+// dividend, recovery, rush armory, Forge steps) AND the Forge action menu.
+// Header at the top; on phones the cards stack BOTTOM-anchored (thumb
+// reach) with the build strip above them and the journey map in the spare
+// room; landscape/desktop deal the cards in a row. ONE action bar anchors
+// at the bottom above SAFE_B: REROLL/BACK · the primary INSTALL · VIEW BUILD.
+// Render and every hit-test read this function only.
 function upgradeLayout() {
+  const forgeMenu = !!(G.forge && G.forge.step === 'menu' && !G.upgradeChoices);
   // AFT-020: finale VICTORY DRAFTS deal 4 (or, countered, 5) offers — the
-  // layout reads the live hand size so both branches stay contained
-  const n = Math.max(3, (G.upgradeChoices || []).length || 3);
+  // layout reads the live hand size so both branches stay contained; the
+  // Forge menu reads its live action count (unavailable actions are omitted)
+  const n = forgeMenu ? Math.max(1, typeof forgeActions === 'function' ? forgeActions().length : 3)
+    : Math.max(3, (G.upgradeChoices || []).length || 3);
   const short = H < 520;
   const stacked = W < 560 && !short;
-  if (stacked) {
-    const ch = Math.min(108, Math.max(58, (H - 210) / n - 14));
-    const cw = Math.min(380, W * 0.92);
-    const x = W / 2 - cw / 2, y0 = Math.min(H * 0.38, H - n * (ch + 14) - 100);
-    const ay = Math.min(y0 + n * (ch + 14) + 6, H - 86), aw = Math.min(150, (W - 36) / 2);
-    const cbw = Math.min(240, aw * 2);
-    return { stacked, short, card: i => ({ x, y: y0 + i * (ch + 14), w: cw, h: ch }),
-      confirm: { x: W / 2 - cbw / 2, y: ay, w: cbw, h: 36 },
-      reroll: { x: W / 2 - aw - 6, y: ay + 44, w: aw, h: 32 },
-      tree: { x: W / 2 + 6, y: ay + 44, w: aw, h: 32 } };
+  const F = sheetFrame(stacked ? 560 : 1120);
+  if (!stacked && F.bottom - F.top > 640) { // desktop: one composed block, centred
+    const mid = (F.top + F.bottom) / 2;
+    F.top = mid - 320; F.bottom = mid + 320;
   }
-  const gap = n > 3 ? 14 : 22;
-  const cw = Math.min(250, (W - 60 - (n - 1) * gap) / n), ch = Math.min(252, H * 0.4);
-  const total = cw * n + gap * (n - 1);
-  const cy = Math.min(H * 0.4, H - ch - 60);
-  const ay = Math.min(cy + ch + 16, H - 48);
-  // three-button row: REROLL · CONFIRM (widest — it's the primary action) · TREE
-  const bw = Math.min(150, (W - 72) / 3.5), cbw = Math.min(200, bw * 1.35), bgap = 12;
-  const row = bw * 2 + cbw + bgap * 2;
-  return { stacked, short, card: i => ({ x: W / 2 - total / 2 + i * (cw + gap), y: cy, w: cw, h: ch }),
-    reroll: { x: W / 2 - row / 2, y: ay, w: bw, h: 34 },
-    confirm: { x: W / 2 - cbw / 2, y: ay, w: cbw, h: 34 },
-    tree: { x: W / 2 + row / 2 - bw, y: ay, w: bw, h: 34 } };
+  const bh = sheetBtnH(), gap = short ? 8 : 10;
+  const headH = short ? 40 : 58, metaH = 24;
+  const head = { x: F.x, y: F.top, w: F.w, h: headH };
+  const barW = stacked ? F.w : Math.min(640, F.w);
+  const bar = { x: F.cx - barW / 2, y: F.bottom - bh, w: barW, h: bh };
+  const sw = Math.round((barW - gap * 2) * (W < 360 ? 0.28 : 0.27));
+  const reroll = { x: bar.x, y: bar.y, w: sw, h: bh };
+  const confirm = { x: bar.x + sw + gap, y: bar.y, w: barW - sw * 2 - gap * 2, h: bh };
+  const tree = { x: bar.x + barW - sw, y: bar.y, w: sw, h: bh };
+  const cardsBottom = forgeMenu ? F.bottom : bar.y - (short ? 10 : 14);
+  const regionTop = head.y + headH + gap;
+  if (stacked) {
+    const cgap = n > 3 ? 8 : 10;
+    const avail = cardsBottom - regionTop - metaH - 8;
+    const ch = Math.max(58, Math.min(forgeMenu ? 116 : 124, (avail - (n - 1) * cgap) / n));
+    const y0 = cardsBottom - (n * ch + (n - 1) * cgap);
+    const meta = { x: F.x, y: y0 - metaH - 8, w: F.w, h: metaH };
+    const room = meta.y - regionTop;
+    // the map + its prompt line sit centred in the spare room
+    const map = room >= 56 ? { x: F.x, y: regionTop + Math.max(0, (room - 48 - 34) * 0.5), w: F.w, h: 48 } : null;
+    return { stacked, short, n, forgeMenu, head, meta, map, bar, reroll, confirm, tree,
+      card: i => ({ x: F.x, y: y0 + i * (ch + cgap), w: F.w, h: ch }) };
+  }
+  const cgap = n > 3 ? 12 : 16;
+  const cw = Math.min(short ? 210 : 260, (F.w - (n - 1) * cgap) / n);
+  const total = cw * n + cgap * (n - 1);
+  const avail = cardsBottom - regionTop - metaH - 8;
+  const mapH = !short && avail >= 300 + 64 ? 48 : 0;
+  const ch = Math.max(120, Math.min(short ? 260 : forgeMenu ? 240 : 310, avail - (mapH ? mapH + 16 : 0)));
+  const free = Math.max(0, avail - (mapH ? mapH + 16 : 0) - ch);
+  const metaY = regionTop + (mapH ? mapH + 16 : 0) + free * 0.45;
+  const x0 = F.cx - total / 2;
+  const map = mapH ? { x: F.cx - Math.min(F.w, 720) / 2, y: regionTop + free * 0.3, w: Math.min(F.w, 720), h: mapH } : null;
+  return { stacked, short, n, forgeMenu, head, map, bar, reroll, confirm, tree,
+    meta: { x: x0, y: metaY, w: total, h: metaH },
+    card: i => ({ x: x0 + i * (cw + cgap), y: metaY + metaH + 8, w: cw, h: ch }) };
 }
 // which tree node the player last tapped, so the detail panel can explain it.
 // kind: 'tier' (pi,ti) · 'bridge' (bi) · 'fusion' (fi) · 'apex' (ai) · 'sat' (si)
@@ -824,11 +960,15 @@ function nextReachableTransformation() {
 }
 function treeListLayout(T) {
   const rowH = Math.max(46, Math.min(56, T.map.h / 8));
-  const chipW = (Math.min(T.map.w, 420) - 16) / 3;
+  // short map boxes (landscape phones) dock the filters BESIDE the camera
+  // row and drop the identity line, so the rows keep the room they need
+  const camR = T.list.x + T.list.w + 10, inline = T.map.h < 220 && T.map.x + T.map.w - 8 - camR >= 3 * 64;
+  const chipW = inline ? Math.min(120, (T.map.x + T.map.w - 8 - camR - 12) / 3) : (Math.min(T.map.w, 420) - 28) / 3;
   const chips = ['all', 'owned', 'next'].map((f, i) => ({ f,
-    x: T.map.x + 8 + i * (chipW + 4), y: T.map.y + 40, w: chipW, h: 26 }));
-  const top = T.map.y + 74;
-  return { rowH, chips, top,
+    x: (inline ? camR : T.map.x + 8) + i * (chipW + 6), y: inline ? T.list.y : T.list.y + T.list.h + 26,
+    w: chipW, h: inline ? T.list.h : 34 })); // kit chips, below the camera row + build line
+  const top = chips[0].y + chips[0].h + (inline ? 6 : 10);
+  return { rowH, chips, top, inline,
     row: i => ({ x: T.map.x + 6, y: top + i * rowH - treeListScroll, w: T.map.w - 12, h: rowH - 6 }),
     maxScroll: n => Math.max(0, n * rowH - (T.map.y + T.map.h - top) + 8) };
 }
@@ -899,16 +1039,17 @@ function upgradeTreeLayout() {
   const buttonY = detail.y + detail.h - buttonH - 10;
   const buttonGap = 8;
   const buttonW = (detail.w - 20 - buttonGap) / 2;
-  const camY = map.y + 8, camH = 30, camGap = 5;
-  const camX = map.x + 8;
+  // AFT-029: kit-sized camera buttons — 36px tall on touch (was 30)
+  const camY = map.y + 8, camH = IS_TOUCH ? 36 : 32, camGap = 6;
+  const camX = map.x + 8, sq = camH, fitW = 46, focW = 60, listW = 52;
   return {
     panel, compact, sideDetail, map, detail, center: { x: cx, y: cy }, radius, inner, step, drawR, panLim, zoom: treeZoom,
-    close: { x: panel.x + panel.w - 44, y: panel.y + 9, w: 34, h: 34 },
-    zoomOut: { x: camX, y: camY, w: 30, h: camH },
-    zoomIn: { x: camX + 30 + camGap, y: camY, w: 30, h: camH },
-    fit: { x: camX + 60 + camGap * 2, y: camY, w: 42, h: camH },
-    focus: { x: camX + 102 + camGap * 3, y: camY, w: 52, h: camH },
-    list: { x: camX + 154 + camGap * 4, y: camY, w: 44, h: camH }, // AFT-009R P4: the phone list view
+    close: IS_TOUCH ? { x: panel.x + panel.w - 48, y: panel.y + 6, w: 42, h: 42 } : { x: panel.x + panel.w - 46, y: panel.y + 9, w: 36, h: 36 },
+    zoomOut: { x: camX, y: camY, w: sq, h: camH },
+    zoomIn: { x: camX + sq + camGap, y: camY, w: sq, h: camH },
+    fit: { x: camX + sq * 2 + camGap * 2, y: camY, w: fitW, h: camH },
+    focus: { x: camX + sq * 2 + fitW + camGap * 3, y: camY, w: focW, h: camH },
+    list: { x: camX + sq * 2 + fitW + focW + camGap * 4, y: camY, w: listW, h: camH }, // AFT-009R P4: the phone list view
     reroll: { x: detail.x + 10, y: buttonY, w: buttonW, h: buttonH },
     confirm: { x: detail.x + detail.w - 10 - buttonW, y: buttonY, w: buttonW, h: buttonH },
     spokeA,
@@ -1040,6 +1181,7 @@ function pickUpgrade(i) {
     G.upgradeChoices = null; G.forge = null; draftSel = null;
     upgradeTreeOpen = false;
     SFX.power();
+    if (rushArmoryNext()) return; // BOSS RUSH: the Forge is followed by the armory hands
     buildLevel(G.level);
     serve();
     setAnnounce('warp', '#ff8a65', 'REFORGED', 'THE RANK RETURNS AS A BANKED ATTUNEMENT CHOICE — IT OPENS AT THE NEXT SAFE BEAT', 3);
@@ -1062,6 +1204,7 @@ function pickUpgrade(i) {
     G.rerolled = false;
     SFX.mega();
     if (!G.upgradeChoices) {
+      if (rushArmoryNext()) return;
       buildLevel(G.level);
       serve();
       queueSecretRewardNotice();
@@ -1082,6 +1225,7 @@ function pickUpgrade(i) {
     if (holdBonusPick(remaining)) return;
     if (G.recoveryDraft) { resumeRecoveryDraft(); return; }
     G.forge = null; // AFT-009R P3: one Forge decision per realm
+    if (rushArmoryNext()) return; // BOSS RUSH: skipped stages still pay their hands
     buildLevel(G.level);
     serve();
     if (G.justEvolved) { G.justEvolved = false; return; }
@@ -1106,11 +1250,12 @@ function pickUpgrade(i) {
     if (holdBonusPick(remaining)) return;
     if (G.recoveryDraft) { resumeRecoveryDraft(); return; }
     G.forge = null; // AFT-009R P3: one Forge decision per realm
+    if (rushArmoryNext()) return; // BOSS RUSH: skipped stages still pay their hands
     buildLevel(G.level);
     serve();
     setAnnounce(c.stack.icon, c.stack.color,
       c.stack.name + ' ×' + G.stacks[c.stack.key],
-      c.stack.desc, 2.4, G.mode === 'junkie' ? 'HELD ITEM STACKED — CHECK YOUR PILOT' : 'MASTERY STACKED — CHECK YOUR BUILD RAIL');
+      c.stack.desc, 2.4, G.mode === 'junkie' ? lex('HELD ITEM STACKED — CHECK YOUR PILOT') : 'MASTERY STACKED — CHECK YOUR BUILD RAIL');
     queueSecretRewardNotice();
     return;
   }
@@ -1126,6 +1271,7 @@ function pickUpgrade(i) {
   if (G.recoveryDraft) { resumeRecoveryDraft(); return; }
   G.forge = null; // AFT-009R P3: one Forge decision per realm
   const capped = pathLvl(c.pathKey) >= 4;
+  if (rushArmoryNext()) return; // BOSS RUSH: skipped stages still pay their hands
   buildLevel(G.level);
   serve();
   // confirm AFTER buildLevel so the stage banner doesn't swallow it —
@@ -1135,7 +1281,7 @@ function pickUpgrade(i) {
   setAnnounce(tier.icon, c.path.color,
     (capped ? '★ ' : '') + shownName + (capped ? ' ★' : ''),
     tierDesc(c.pathKey, c.tierIdx), capped ? 3 : 2.2,
-    (G.mode === 'junkie' ? 'HELD ITEM EQUIPPED · ' : '') + skinPathName(c.pathKey) + ' PATH ' + pathLvl(c.pathKey) + '/4' + (capped ? ' — CAPSTONE UNLOCKED!' : ''));
+    (G.mode === 'junkie' ? lex('HELD ITEM EQUIPPED · ') : '') + skinPathName(c.pathKey) + ' PATH ' + pathLvl(c.pathKey) + '/4' + (capped ? ' — CAPSTONE UNLOCKED!' : ''));
   queueSecretRewardNotice();
   if (capped) SFX.mega();
 }
@@ -1206,9 +1352,11 @@ function dexCloseGeom() { return { x: 14, y: 14, w: 110, h: 36 }; }
 // Forge) — ordinary stages roll straight into the next wave; the frequent
 // picks ride the attunement levels now. The Rift bounty draft still shows.
 function afterResultsDestination() {
+  if (G.rush && G.rush.done) { finishRush(); return; } // BOSS RUSH: the ninth finale ends here
   if (G.forge || G.upgradeChoices || (G.secret && G.secret.rewardDraft)) {
     G.state = 'upgrade'; G.stateT = 0;
   } else {
+    if (rushArmoryNext()) return;
     buildLevel(G.level);
     serve();
   }
@@ -1230,7 +1378,8 @@ function advanceCeremony() {
 }
 function retryFromSummary() {
   SESSION_STATS.restarts++;
-  if (G.daily) startDailyRun();
+  if (G.rush) startBossRush(G.rush.seed);
+  else if (G.daily) startDailyRun();
   else resetRun(G.runStartLevel || 1, !!G.trial);
 }
 function trialFromSummary() {
@@ -1271,6 +1420,13 @@ function onPress(x, y) {
     return;
   }
   if (G.state === 'dex') {
+    if (dossierDetail) { // AFT-013: the dossier page owns every tap while open
+      const R = dossierPageRects || {};
+      if (R.prev && inRect(x, y, R.prev)) { stepDossier(-1); return; }
+      if (R.next && inRect(x, y, R.next)) { stepDossier(1); return; }
+      if (R.card && inRect(x, y, R.card)) return; // the page itself is inert
+      dossierDetail = null; SFX.wall(); return;   // outside → close
+    }
     if (dexDetail) { // the gallery overlay owns every tap while open
       const R = dexDetailRects || {};
       if (R.radiant && inRect(x, y, R.radiant)) {
@@ -1283,6 +1439,26 @@ function onPress(x, y) {
       if (R.card && inRect(x, y, R.card)) return; // the card itself is inert
       dexDetail = null; SFX.wall(); return;       // outside → close
     }
+    // AFT-013: the tab strip (collection | boss dossiers)
+    const HL = dexHeadLayout();
+    for (let i = 0; i < 2; i++) {
+      if (inRect(x, y, HL.tabs[i])) {
+        const want = i ? 'boss' : 'grid';
+        if (dexTab !== want) { dexTab = want; dexScroll = 0; SFX.power(); }
+        return;
+      }
+    }
+    if (dexTab === 'boss') {
+      const tile = y > HL.top - 4 ? dossierTileRects.find(c => inRect(x, y, c)) : null;
+      if (tile) {
+        if (tile.seen) { dossierDetail = { key: tile.key }; SFX.power(); }
+        else SFX.wall(); // unmet: a silhouette, a soft deny
+        return;
+      }
+      if (inRect(x, y, dexCloseGeom())) { G.state = 'menu'; dexScroll = 0; }
+      else if (!IS_TOUCH) { G.state = 'menu'; dexScroll = 0; }
+      return;
+    }
     const cell = dexCellRects.find(c => inRect(x, y, c));
     if (cell && DEX.has(cell.id)) { dexDetail = { id: cell.id, radiant: false }; SFX.power(); return; }
     if (inRect(x, y, dexCloseGeom())) { G.state = 'menu'; dexScroll = 0; dexDetail = null; }
@@ -1291,6 +1467,13 @@ function onPress(x, y) {
   }
   if (G.state === 'results') { advanceResults(); return; }
   if (G.state === 'ceremony') { advanceCeremony(); return; }
+  if (G.state === 'gameover' && G.rush) { // BOSS RUSH summary: RETRY RUSH / TITLE
+    const RL = rushSummaryLayout();
+    if (G.stateT < 0.45) return; // the killing blow's tap never skips the summary
+    if (inRect(x, y, RL.retry)) { retryFromSummary(); SFX.power(); return; }
+    if (inRect(x, y, RL.title)) { G.rush = null; G.state = 'menu'; menuPage = 'modes'; SFX.wall(); return; }
+    return;
+  }
   if (G.state === 'gameover') {
     const L = gameOverLayout();
     if (G.daily && inRect(x, y, L.share)) { shareDailyResult(); return; }
@@ -1478,6 +1661,7 @@ function onPress(x, y) {
         startTrialSelection();
         return;
       }
+      if (inRect(x, y, T.rush)) { startBossRush(); SFX.power(); return; }
       return;
     }
     // PAGE 2 — two clear decisions: all partners first, then challenge.
@@ -1519,7 +1703,7 @@ function onPress(x, y) {
               // sides here, but you can never return to "no side"
               SETTINGS.affinity = affs[i];
               G.affinityFx = { key: affs[i], until: G.time + 0.9 };
-              saveSettings(); SFX.mega(); haptic('mega'); return;
+              saveSettings(); SFX.mega(); haptic('success'); return;
             }
           }
         }
@@ -1567,7 +1751,7 @@ function onPress(x, y) {
         return;
       }
     }
-    if (inRect(x, y, dexBtnGeom())) { G.state = 'dex'; dexScroll = 0; return; }
+    if (inRect(x, y, dexBtnGeom())) { G.state = 'dex'; dexScroll = 0; dexTab = 'grid'; dossierDetail = null; return; }
     if (inRect(x, y, L.adv)) { advOpen = true; return; }
     return;
   }
@@ -1613,14 +1797,13 @@ function addWeaponHeat(amount) {
   G.heat = Math.min(1, G.heat + amount);
   if (before < 0.7 && G.heat >= 0.7) {
     tone(420, 0.09, 'sawtooth', 0.045, 120);
-    haptic('warn');
     // AFT-010 VISUAL SOUND CUES: the threshold beeps were the one cue with
     // no discrete visual (the gauge only creeps) — mirror them as floaters
     if (SETTINGS.visualCues) addFloater(G.paddle.x, shipY() - 62, 'HEAT 70%', '#ffd54f', 13);
   }
   if (before < 0.9 && G.heat >= 0.9) {
     tone(250, 0.14, 'sawtooth', 0.06, -80);
-    haptic('warn');
+    haptic('warning');
     if (SETTINGS.visualCues) addFloater(G.paddle.x, shipY() - 62, 'HEAT 90%!', '#ff9d3d', 14);
   }
   if (G.heat >= 1 && G.overheat <= 0) {
@@ -1856,7 +2039,6 @@ function fireCharge(c, resonant = false) {
   G.muzzle = 0.18;
   G.shake = Math.min(G.shake + 2 + c * 4, 12);
   if (resonant) {
-    haptic('resonant'); // AFT-021 P8
     addFloater(G.paddle.x, shipY() - 72, 'RESONANT!', '#80ffea', 15);
     ringFx(G.paddle.x, shipY() - 20, '#80ffea', 5, 74, 3, 0.4);
     tone(1240, 0.16, 'sine', 0.06, 320); // the crystalline timing chime
@@ -1887,7 +2069,7 @@ function fireCharge(c, resonant = false) {
   }
   if (c >= 0.9) crownRelease(); // CROWNED RELIC: a full charge fans the bank
   fusionChargeReleases(c); // meteor / cataclysm / shepherd / mirror / battery
-  SFX.blaster();
+  SFX.chargeShot(c); // AFT-027: the big shot has its own report (was the tap blip)
   tone(170 + c * 320, 0.2, 'sawtooth', 0.06, 300);
 }
 function primaryAction() {
@@ -1905,7 +2087,7 @@ function primaryAction() {
     }
     return;
   }
-  if (G.state === 'gameover') { retryFromSummary(); return; }
+  if (G.state === 'gameover') { if (G.rush && G.stateT < 1) return; retryFromSummary(); return; } // a rush summary is READ before a key can retry
   if (G.state === 'results') { advanceResults(); return; }
   if (G.state === 'ceremony') { advanceCeremony(); return; }
   if (G.state === 'upgrade') return;
@@ -1960,7 +2142,14 @@ function tryMega() {
     crownRelease(); // AFT-007 BREAKER adapter: Mega ignition fans the relic bank
   }
   G.shake = 14;
-  haptic('boss');
+  // AFT-027: ignition is a MOMENT — a gold flash (never hurt-red), a wide
+  // ring off the hull, a sub drop and a beat of hit-stop. Presentation only.
+  flashFx(0.2, '255,213,79');
+  ringFx(G.paddle.x, shipY(), '#ffd54f', 12, Math.min(W * 0.55, 300), 5, 0.6);
+  ringFx(G.paddle.x, shipY(), '#ffffff', 8, Math.min(W * 0.3, 170), 3, 0.42);
+  G.freeze = Math.max(G.freeze, 0.09);
+  SFX.surgeIgnite();
+  haptic('ability');
   SFX.mega();
   // mode-honest — calm classic has no guns, the shooters get support fire
   setAnnounce('mega', '#ffd54f', SKIN.strings.megaBang || 'MEGA EVOLUTION!',

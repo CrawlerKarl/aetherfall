@@ -11,6 +11,9 @@ engine:
 - **BREAKER** — a calm, pure brick-breaker. The ball is the only weapon.
 - **BLASTER** — ball-less wall clearing with a piercing charge shot.
 
+Finished a realm or nine? **SOVEREIGN RUSH** (in the Trial picker) strings
+all nine realm finales into one timed run and keeps your best time.
+
 Every creature, vessel, sentinel, sovereign, weapon relic, missile, and ship
 fitting ships hand-finished WebP art in the same Relicforge style, with true
 prismatic RADIANT vessel forms. 100% vanilla JS + Canvas — no build step, no
@@ -26,6 +29,16 @@ opacity, follow speed, left-handed mirroring, and haptics. Every
 accessibility option is off by default and changes nothing until you reach
 for it. If the frame rate ever struggles on an older phone, set **EFFECTS
 QUALITY** to AUTO (the default, which adapts on its own) or pin MINIMAL.
+
+## Install it — it plays offline
+
+AETHERFALL is an installable web app. On a phone, open the site and choose
+**Add to Home Screen** (Safari: Share → Add to Home Screen; Chrome: ⋮ →
+Install app). It then launches fullscreen from its own icon, and after one
+online visit the whole game — every realm's art included — is cached, so it
+plays with no connection at all. Updates arrive on their own the next time
+you open it online. Your saves stay in your browser; **Settings → SAVE** can
+export a backup file at any time.
 
 ## Running locally
 
